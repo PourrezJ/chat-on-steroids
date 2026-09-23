@@ -192,6 +192,7 @@ const settingsPatch = z.object({
   mcp: z.object({ instructions: z.string().trim().max(MAX_MCP_INSTRUCTIONS_CHARS) }).strict().optional(),
   goal: z.object({
     impulseMinutes: z.number().int().min(0).max(60).optional(),
+    loopTimerMinutes: z.number().int().min(0).max(720).optional(),
     includeToolCalls: z.boolean().optional(),
       backend: z.enum(['api', 'chatgpt', 'templates']).optional(),
       loopBackend: z.enum(['api', 'chatgpt']).optional(),
@@ -333,6 +334,7 @@ function mergeSettings(current: Config, base: SettingsSnapshot, wanted: Settings
     },
     goal: {
       impulseMinutes: pick(current.goal.impulseMinutes, base.goal.impulseMinutes, wanted.goal.impulseMinutes),
+      loopTimerMinutes: pick(current.goal.loopTimerMinutes, base.goal.loopTimerMinutes, wanted.goal.loopTimerMinutes),
       includeToolCalls: pick(current.goal.includeToolCalls, base.goal.includeToolCalls, wanted.goal.includeToolCalls),
       backend: pick(current.goal.backend, base.goal.backend, wanted.goal.backend),
       loopBackend: pick(current.goal.loopBackend, base.goal.loopBackend, wanted.goal.loopBackend),
@@ -480,6 +482,10 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
       before.goal.enabled !== next.goal.enabled ||
       // The mode is authority too: a draft started as a gate must not be typed after the user
       // asked for a loop, and a loop draft must not be typed after they asked for a gate.
+      // The Loop cadence is part of that same authority: a continuation prepared under the
+      // old interval must not be typed after the user changed it, and switching the timer off
+      // must not leave a clock-driven draft in flight.
+      before.goal.loopTimerMinutes !== next.goal.loopTimerMinutes ||
       before.goal.mode !== next.goal.mode ||
       before.goal.model !== next.goal.model ||
       before.goal.backend !== next.goal.backend ||

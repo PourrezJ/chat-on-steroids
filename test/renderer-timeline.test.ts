@@ -3059,6 +3059,24 @@ it('shows the immediate recovery deadline before a draft exists and clears it on
   expect(row.hidden).toBe(true);
 });
 
+it('shows the Loop timer as its own countdown instead of folding it into the shared recovery row', async () => {
+  const { w, append } = await boot([]);
+  const api = (w as any).api, original = api.getSessionControls;
+  const deadline = Date.now() + 120_000;
+  const goalWait: object = { reason: 'timer', until: deadline };
+  // The silence countdown at the very same instant would swallow a *shared* wait — the dock
+  // already describes it. A timer is the user's own interval, so it keeps its own row rather
+  // than deferring to a deadline that happens to coincide.
+  const recovery = [{ kind: 'silence', deadline, visibleAt: 0 }, { kind: 'pickup', deadline, visibleAt: 0 }];
+  api.getSessionControls = async (id: string) => ({ ok: true, data: { ...(await original(id)).data,
+    automation: 'loop', goalWait, recovery, goalDraft: null } });
+  await append([]);
+  const row = w.document.getElementById('goalLifecycle')!;
+  expect(row.hidden).toBe(false);
+  expect(row.textContent).toContain('Loop · Waiting for the Loop timer');
+  expect(row.querySelector('[role="timer"]')).not.toBeNull();
+});
+
 it.each([
   { reason: 'silence', kind: 'silence' },
   { reason: 'listening', kind: 'post-reload' },

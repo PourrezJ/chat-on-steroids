@@ -12583,6 +12583,76 @@ it('retires an already armed ordinary Goal repair when its conversation is now f
   } finally { resetGoalStateForTests(); await setSecret('openRouterApiKey', ''); await saveConfig(previous); vi.useRealTimers(); }
 });
 
+it('drives a Loop chat on the configured timer, immune to activity and deferred by a compaction', async () => {
+  const previous = getConfig();
+  vi.useFakeTimers();
+  try {
+    // Seven minutes, deliberately not one of the ordinary 2/5/10/15 rungs: a deadline that
+    // slid to a ladder value instead of the configured one is the regression this guards.
+    await saveConfig({ ...previous, goal: { ...previous.goal, enabled: true, mode: 'loop', loopTimerMinutes: 7 } });
+    await pair();
+    const chat = 'cafe0174-0000-4000-8000-000000000174';
+    const goalRepairs = async (): Promise<any[]> =>
+      ((await request('GET', '/status')).body.repairs ?? [])
+        .filter((row: any) => row.conversationId === chat && row.reason === 'goal');
+    await request('POST', '/events', { body: { conversationId: chat, events: [
+      { kind: 'model_selection', model: 'GPT-5.6 Sol', reasoningEffort: 'high', time: Date.now() },
+      { kind: 'user_message', time: Date.now(), text: 'keep going', messageId: 'm-loop-timer' }
+    ] } });
+    const sessionId = (await request('GET', `/activity?conversationId=${chat}`)).body.sessionId;
+    // A Loop decision owes its local proof first: mint the reply only after that proof exists.
+    const { recordLoopMcpProof } = await import('./goal-mcp-proof.js');
+    await recordLoopMcpProof(sessionId, 'g-timer');
+    await recordFinalForTest(chat, 'g-timer');
+    const accepted = Date.now();
+    await acceptGoalReplyNow({ conversationId: chat, sessionId, replyId: 'timer-final', turnId: 'g-timer', eventSeq: 100, blocked: false });
+    expect(goalPendingReplyFor(chat)).not.toBeNull();
+
+    // The first sweep arms one fresh interval from acceptance, not the 2-minute opening rung.
+    await sweepStaleSwarm(Date.now());
+    const armed = (await sessionControlsFor(sessionId)).goalWait;
+    expect(armed).toEqual({ reason: 'timer', until: accepted + 7 * 60_000 });
+
+    // Inside the interval nothing is owed: the ordinary ladder's first rung never fires.
+    await vi.advanceTimersByTimeAsync(60_000);
+    await sweepStaleSwarm(Date.now());
+    expect(await goalRepairs()).toEqual([]);
+    expect((await sessionControlsFor(sessionId)).goalWait).toEqual(armed);
+
+    // A compaction owns the frontend while it runs. The original deadline expires mid-rebind,
+    // so the timer must restart one fresh interval from the moment the chat is free again
+    // rather than fire into the replacement chat the instant it appears.
+    const continuation = await openContinuationNow(sessionId, chat);
+    await vi.advanceTimersByTimeAsync(7 * 60_000);
+    const duringCompaction = Date.now();
+    await sweepStaleSwarm(Date.now());
+    expect((await sessionControlsFor(sessionId)).goalWait).toEqual({ reason: 'timer', until: duringCompaction + 7 * 60_000 });
+    expect(await goalRepairs()).toEqual([]);
+    expect(abortContinuation(continuation.token, 'loop timer test')).toBe(true);
+
+    // The restarted interval is a full one: six of the fresh seven minutes still owe nothing,
+    // and only the seventh queues the reload.
+    await vi.advanceTimersByTimeAsync(6 * 60_000);
+    await sweepStaleSwarm(Date.now());
+    expect(await goalRepairs()).toEqual([]);
+    await vi.advanceTimersByTimeAsync(60_000);
+    await sweepStaleSwarm(Date.now());
+    expect(await goalRepairs()).toEqual([expect.objectContaining({ conversationId: chat, reason: 'goal' })]);
+
+    // Page activity is not a stall: the user named the interval, so native work must not
+    // push the next one out to a backoff rung.
+    const due = (await sessionControlsFor(sessionId)).goalWait;
+    expect(due?.reason).toBe('timer');
+    const probe = await request('POST', '/events', { body: { conversationId: chat, events: [
+      { kind: 'model_selection', model: 'GPT-5.6 Sol', reasoningEffort: 'high', time: Date.now() },
+      { kind: 'turn_start', turnId: 'g-timer-probe', time: Date.now() },
+      { kind: 'page_tool', turnId: 'g-timer-probe', messageId: 'timer-native-tool', text: 'Searching files', activeNow: true, time: Date.now() }
+    ] } });
+    expect(probe.status).toBe(200);
+    expect((await sessionControlsFor(sessionId)).goalWait).toEqual(due);
+  } finally { resetGoalStateForTests(); await saveConfig(previous); vi.useRealTimers(); }
+});
+
 it('preserves pending commands and durable ACK receipts across a port switch', async () => {
   await pair();
   const failed = await compactedSession('ea000001-1111-4222-8333-444444444444', 'Receipt retained');

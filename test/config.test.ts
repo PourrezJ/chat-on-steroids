@@ -548,6 +548,7 @@ describe('the goal loop settings', () => {
       loopBackend: 'chatgpt',
       includeToolCalls: false,
       impulseMinutes: 0,
+      loopTimerMinutes: 0,
       helperModel: 'gpt-5.6-sol',
       helperReasoning: 'high',
       enabled: true,
@@ -704,7 +705,8 @@ describe('the goal loop settings', () => {
       reasoning: 'default',
       prompt: defaultConfig().goal.prompt,
       objectivePrompt: defaultConfig().goal.objectivePrompt,
-      loopPrompt: defaultConfig().goal.loopPrompt
+      loopPrompt: defaultConfig().goal.loopPrompt,
+      loopTimerMinutes: 0
     });
   });
 

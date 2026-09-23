@@ -57,12 +57,22 @@ import { findSessionByConversation, getSession, readEvents, readHandoff, readRec
 import { foldProgress } from '../shared/session.js';
 import { supportsFinishAutomation } from '../shared/finish.js';
 
-/** A finish-only preference has authority only while the finish tool is available. */
+/**
+ * A finish-only preference has authority only while the finish tool is available.
+ *
+ * A configured Loop timer defeats it. Finish-only means "ask the agent whether the job is
+ * done when it says it is nearly done", which schedules the next message at a boundary the
+ * agent announces. A timer is the opposite instruction: the user named the interval, and a
+ * chat that waits for a finish call it will never make — or that has already made one —
+ * would simply never continue. The timer is the more specific answer to "when do I go
+ * again", so it wins, and the chat falls back to the ordinary after-turn boundary.
+ */
 export async function astraFinishOnly(sessionId: string, conversationId: string): Promise<boolean> {
   const session = await getSession(sessionId);
   const selection = session?.selectedModel;
   return getConfig().ui.finishTool === true && session?.conversationId === conversationId && selection?.conversationId === conversationId &&
     supportsFinishAutomation(goalSwitchFor(conversationId).mode, selection.model, selection.reasoningEffort) &&
+    loopTimerMsFor(conversationId) === 0 &&
     !loopAfterTurnFor(conversationId);
 }
 /** The saved loopAfterTurn preference now serves both Goal and Loop. Disabling
@@ -70,6 +80,26 @@ export async function astraFinishOnly(sessionId: string, conversationId: string)
 export function loopAfterTurnFor(conversationId: string): boolean {
   const control = goalSwitchFor(conversationId);
   return control.enabled && (control.afterTurn || getConfig().ui.finishTool !== true);
+}
+
+/**
+ * The configured Loop cadence in milliseconds, or zero when the timer is off.
+ *
+ * Two conditions, both deliberate. The mode must actually be `loop`: Goal exists to decide
+ * that the job is finished, and typing into it on a clock would contradict the thing it is
+ * for. And the switch must be effective for this chat, because a timer is delivery authority
+ * and a disabled chat has none. Per-chat mode wins over the app default through
+ * `goalSwitchFor`, exactly as the ordinary continuation does.
+ *
+ * The value is read from current config here and now. The caller that freezes it into a
+ * deadline owns the snapshot; nothing else should re-derive it mid-flight.
+ */
+export function loopTimerMsFor(conversationId: string): number {
+  const minutes = getConfig().goal.loopTimerMinutes ?? 0;
+  if (minutes <= 0) return 0;
+  const control = goalSwitchFor(conversationId);
+  if (!control.enabled || control.mode !== 'loop') return 0;
+  return minutes * 60_000;
 }
 import { resumeBootstrapMatches, resumeBootstrapText } from './session/handoff.js';
 import {

@@ -246,6 +246,24 @@ export interface GoalProviderSettings {
 export interface GoalSettings {
   /** Optional active-turn Goal impulses; zero disables them. */
   impulseMinutes?: number;
+  /**
+   * Fixed delay, in minutes, between one finished Loop answer and the next automatic message.
+   *
+   * Zero is Off, which is the shipped default: the ordinary schedule waits on evidence of a
+   * stalled pickup and backs off 2, 5, 10 then 15 minutes. A timer replaces that ladder with
+   * the interval the user asked for, and — because the whole point is a steady cadence rather
+   * than a stall recovery — page activity does not push the next one out. It applies to Loop
+   * only: Goal exists to decide that no further message is needed, so a fixed cadence would
+   * contradict what it is for.
+   *
+   * This is a dwell time, not a poll. The existing reply obligation, its source question and
+   * its twelve-hour lifetime still govern whether anything is owed at all, and a compaction in
+   * progress still owns its own cadence and keeps the timer from firing into a rebind.
+   *
+   * It also overrides the finish-only preference, which would otherwise hold the chat back for
+   * a finish call this cadence has no reason to expect. See `astraFinishOnly`.
+   */
+  loopTimerMinutes?: number;
   /** Include tool details in handoff briefs only; Goal/Loop always use authored conversation text. */
   includeToolCalls?: boolean;
   helperModel?: string;

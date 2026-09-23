@@ -17453,6 +17453,9 @@ describe('the goal loop', () => {
     expect(view({ phase: 'settling', wait: { reason: 'listening', until: live.window.Date.now() + 60_000 } })).toMatchObject({
       stage: 'Waiting for activity after recovery', detail: 'Checking again in 1:00'
     });
+    expect(view({ phase: 'settling', wait: { reason: 'timer', until: live.window.Date.now() + 60_000 } })).toMatchObject({
+      stage: 'Waiting for the Loop timer', detail: 'Checking again in 1:00'
+    });
     expect(view({ phase: 'requesting', error: '', model: MODEL, draft: null })).toMatchObject({
       stage: 'Sending the answer to OpenRouter',
       // The short name, because `deepseek/deepseek-v4-flash` is the id the API wants and not

@@ -2198,6 +2198,66 @@ describe('a chat driven towards a specific goal', () => {
     // …and only that chat's, and only once.
     expect(goal.retireGoalDraftsFor('c-obj-swap')).toBe(false);
   });
+
+  /**
+   * The one place the timer's authority is decided.
+   *
+   * Three conditions have to hold together and each of them was a deliberate choice, so each
+   * gets its own case: the value must be configured, the chat must be switched on, and its
+   * mode must be Loop. Anything else answers zero, which every caller already reads as "use
+   * the ordinary schedule" — so a wrongly-armed timer is impossible to reach by accident.
+   */
+  it('arms the Loop timer only for an enabled, looping chat', async () => {
+    const base = (await import('../src/main/config.js')).getConfig();
+    const withTimer = (minutes: number) =>
+      saveConfig({ ...base, goal: { ...base.goal, loopTimerMinutes: minutes } });
+
+    // Off by default. A fresh install must not type into its chats on a clock.
+    expect(base.goal.loopTimerMinutes).toBe(0);
+    expect(goal.loopTimerMsFor('c-timer-app')).toBe(0);
+
+    await withTimer(5);
+    // Configured, but the app-wide switch is still off, so nothing is owed and nothing is armed.
+    expect(goal.loopTimerMsFor('c-timer-app')).toBe(0);
+
+    await goal.setGoalSwitchNow('c-timer-off', 'loop', false);
+    expect(goal.loopTimerMsFor('c-timer-off')).toBe(0);
+
+    await goal.setGoalSwitchNow('c-timer-on', 'loop', true);
+    expect(goal.loopTimerMsFor('c-timer-on')).toBe(300_000);
+
+    // Goal is the mode that is allowed to decide the work is finished; a clock that keeps
+    // asking would contradict the whole point of it.
+    await goal.setGoalSwitchNow('c-timer-goal', 'goal', true);
+    expect(goal.loopTimerMsFor('c-timer-goal')).toBe(0);
+
+    // Zero is the documented way back to the stall-and-retry schedule.
+    await withTimer(0);
+    expect(goal.loopTimerMsFor('c-timer-on')).toBe(0);
+  });
+
+  /**
+   * Finish-only schedules the next message at a boundary the agent announces; a timer is
+   * the user's own answer to "when do I go again". Both cannot be right for one chat, and
+   * the more specific instruction wins — otherwise a chat waiting for a finish call it will
+   * never make would simply never continue.
+   */
+  it('lets a configured Loop timer override the finish-only Astra preference', async () => {
+    const config = (await import('../src/main/config.js')).getConfig();
+    const id = 'loop-timer-astra-test';
+    const session = await createSession({ conversationId: id });
+    await observeSessionModel(session.id, id, 'gpt-6-pro', Date.now(), 'pro');
+    await goal.setGoalSwitchNow(id, 'loop', true);
+
+    // No timer: finish-only holds the chat until the agent reports the job nearly done.
+    await saveConfig({ ...config, ui: { ...config.ui, finishTool: true }, goal: { ...config.goal, loopTimerMinutes: 0 } });
+    expect(await goal.astraFinishOnly(session.id, id)).toBe(true);
+
+    // A configured interval replaces that boundary, so the chat falls back to the ordinary
+    // after-turn continuation instead of waiting for a call this cadence never asked for.
+    await saveConfig({ ...config, ui: { ...config.ui, finishTool: true }, goal: { ...config.goal, loopTimerMinutes: 5 } });
+    expect(await goal.astraFinishOnly(session.id, id)).toBe(false);
+  });
 });
 
 /**

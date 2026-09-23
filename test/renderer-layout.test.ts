@@ -438,7 +438,9 @@ describe('the settings sheet', () => {
   it('asks for a single compaction threshold', () => {
     const pane = document.querySelector('.view[data-view="settings"]')!;
     const numbers = [...pane.querySelectorAll('input[type="number"]')].map((input) => input.id);
-    expect(numbers).toEqual(['maWorkers', 'autoCompactTokens']);
+    // Every number field on the sheet, listed so a new one is a deliberate decision: the
+    // Loop timer is minutes, `maWorkers` a count, and compaction still has one threshold.
+    expect(numbers).toEqual(['goalLoopTimer', 'maWorkers', 'autoCompactTokens']);
     for (const id of ['sessRecord', 'sessRetain', 'sessAdvisory', 'sessLimit']) {
       expect(document.getElementById(id), `#${id} is back`).toBeNull();
     }

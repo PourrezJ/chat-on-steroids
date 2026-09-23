@@ -134,6 +134,10 @@ const DEFAULT_GOAL: GoalSettings = {
   backend: 'chatgpt',
   loopBackend: 'chatgpt',
   impulseMinutes: 0,
+  // Off. The shipped default stays the evidence-driven schedule, because a chat that types
+  // into itself on a clock is a deliberate choice, not something to discover by flipping a
+  // switch that is already on.
+  loopTimerMinutes: 0,
   includeToolCalls: false,
   helperModel: 'gpt-5.6-sol',
   helperReasoning: 'high',
@@ -357,6 +361,9 @@ const configSchema = z.object({
   goal: z
     .object({
       impulseMinutes: z.number().int().min(0).max(60).optional().default(0).catch(0),
+      // Capped at the reply obligation's own twelve-hour lifetime: a longer interval could
+      // never fire, because the row it would collect has already expired by then.
+      loopTimerMinutes: z.number().int().min(0).max(720).optional().default(0).catch(0),
       includeToolCalls: z.boolean().optional().default(false),
       enabled: z.boolean().optional().default(DEFAULT_GOAL.enabled),
       backend: z.enum(['api', 'chatgpt', 'templates']).optional().default('chatgpt'),
@@ -425,10 +432,10 @@ const configSchema = z.object({
         .optional()
         .default(DEFAULT_GOAL.loopPrompt)
         .transform((prompt) => (prompt.trim() === '' ? DEFAULT_GOAL.loopPrompt : prompt.trim()))
-        .catch(DEFAULT_GOAL.loopPrompt)
+        .catch(DEFAULT_GOAL.loopPrompt),
     })
     .optional()
-    .default({ ...DEFAULT_GOAL, backend: 'chatgpt', loopBackend: 'chatgpt', impulseMinutes: 0, includeToolCalls: false, helperModel: 'gpt-5.6-sol', helperReasoning: 'high' }),
+    .default({ ...DEFAULT_GOAL, backend: 'chatgpt', loopBackend: 'chatgpt', impulseMinutes: 0, loopTimerMinutes: 0, includeToolCalls: false, helperModel: 'gpt-5.6-sol', helperReasoning: 'high' }),
   mcp: z
     .object({
       // Repaired rather than rejected, like the Goal prompts above: this is free text a person

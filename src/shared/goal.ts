@@ -1,7 +1,14 @@
 /** Maximum editable Goal instruction size accepted by config and renderer IPC. */
 export const MAX_GOAL_SYSTEM_PROMPT_CHARS = 20_000;
 /** Presentation of an existing continuation gate; never grants send authority. */
-export type GoalWait = { reason: 'tools' | 'quiet' | 'silence' | 'listening' | 'native-busy' | 'settling'; until?: number };
+export type GoalWait = {
+  /**
+   * `timer` is the fixed Loop cadence described by `GoalSettings.loopTimerMinutes`: an owed
+   * Loop decision the user asked to be delivered on a clock rather than on a stall.
+   */
+  reason: 'tools' | 'quiet' | 'silence' | 'listening' | 'native-busy' | 'settling' | 'timer';
+  until?: number;
+};
 /** Default API model, also used when switching back from a custom model namespace. */
 export const DEFAULT_GOAL_MODEL = 'z-ai/glm-5.3';
 

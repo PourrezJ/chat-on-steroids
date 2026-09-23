@@ -80,6 +80,7 @@ import {
   consumeGoalReplyForInputNow,
   goalSwitchFor,
   goalViewFor,
+  loopTimerMsFor,
   pendingGoalReplies,
   retireGoalDrafts,
   goalDraftNeedsIntervention,
@@ -5849,6 +5850,12 @@ async function goalWaitFor(conversationId: string, sessionId: string, now = Date
   }
   if (runningToolCalls(conversationId) > 0) return { reason: 'tools' };
   if ((pending.listenUntil ?? 0) > now) return { reason: pending.silenceSourceTurnId ? 'listening' : 'native-busy', until: pending.listenUntil };
+  // A timer-driven Loop has a real deadline to show, and unlike the settling states below it
+  // is not a guess about whether the chat is working — the user named the moment. It comes
+  // after the two genuine holds above (a running tool, a live busy/deferral deadline) so a
+  // countdown never promises a delivery that something else is still blocking.
+  const timerWatch = pickupWatch.get(conversationId);
+  if (timerWatch && timerWatch.timer > 0 && timerWatch.dueAt > now) return { reason: 'timer', until: timerWatch.dueAt };
   const grant = activeUntil.get(conversationId);
   if (grant?.sessionId === sessionId && grant.mcpBacked && !grant.thinkingFailed && grant.until > now)
     return { reason: 'quiet', until: grant.until };
@@ -7138,6 +7145,10 @@ function finishSilentChats(conversationIds: readonly string[]): void {
  * was the pickup rather than the turn. Retries slow to fifteen minutes and retain that
  * cadence while the original bounded obligation remains eligible. A temporary outage
  * longer than five attempts must not silently strand still-owed work.
+ *
+ * A Loop with a configured timer does not use any of these rungs: `GoalSettings.loopTimerMinutes`
+ * replaces the whole ladder for that chat's generated continuations, because the user asked for a
+ * cadence rather than for a stall to be detected. Authored queued input keeps this ladder.
  */
 // Asserted non-empty: the opening gap is read unconditionally when a schedule is armed, and a
 // schedule with no first step would be a watchdog that never starts.
@@ -7152,8 +7163,14 @@ const PICKUP_BACKOFF_MS = [2, 5, 10, 15].map((minutes) => minutes * 60_000) as [
  *
  * The row is keyed to the exact `replyId` it was armed for. A newer final answer is a different
  * obligation and gets its own schedule; a discharged one takes its schedule with it.
+ *
+ * `timer` is this chat's configured Loop cadence when it was armed, in milliseconds, or zero for
+ * the ordinary ladder. When it is set the wait is a dwell time the user asked for rather than a
+ * stall to be detected, so it replaces both the opening gap and the advance, and page activity
+ * does not push it out. Attempts still advance — the counter bounds an unattended run, it does
+ * not describe the gap — and the twelve-hour expiry still applies.
  */
-const pickupWatch = new Map<string, { replyId: string; dueAt: number; attempts: number; expiresAt: number }>();
+const pickupWatch = new Map<string, { replyId: string; dueAt: number; attempts: number; expiresAt: number; timer: number }>();
 const PICKUP_WATCH_LIFETIME_MS = 12 * 60 * 60_000;
 
 /**
@@ -7234,19 +7251,40 @@ function forgetGoalWatch(conversationId: string): void {
 let pickupWatchFloor: number | null = null;
 let compactionWatchFloor: number | null = null;
 
-/** Any sign of life pushes the next reload out by the gap this chat is currently on. */
+/**
+ * Any sign of life pushes the next reload out by the gap this chat is currently on.
+ *
+ * The one exception is a timer-driven Loop watch: its deadline is a cadence the user
+ * configured, not a suspicion that the chat has stopped, so observing work does not move it.
+ * That is also why every call site can stay unconditional — a caller never has to know which
+ * kind of watch it is looking at.
+ */
 function notePickupActivity(conversationId: string): void {
   const watch = pickupWatch.get(conversationId);
-  if (!watch) return;
+  if (!watch || watch.timer > 0) return;
   const gap = PICKUP_BACKOFF_MS[Math.min(watch.attempts, PICKUP_BACKOFF_MS.length - 1)]!;
   watch.dueAt = Date.now() + gap;
+}
+
+/**
+ * The gap to wait before this chat's next pickup, given the timer frozen onto its watch.
+ *
+ * With a Loop timer the answer is that configurable dwell time, every time: the feature exists
+ * so a recurring Loop resumes on a cadence instead of on evidence of a stall, and a ladder of
+ * 2, 5, 10 then 15 minutes would be that stall detector again with a different first step.
+ * Without one it is the ordinary ladder, capped at its last rung so a long outage keeps the
+ * fifteen-minute cadence rather than stranding owed work.
+ */
+function pickupGapFor(watch: { attempts: number; timer: number }, ladderIndex: number): number {
+  if (watch.timer > 0) return watch.timer;
+  return PICKUP_BACKOFF_MS[Math.min(ladderIndex, PICKUP_BACKOFF_MS.length - 1)]!;
 }
 
 /** One pickup tree for authored input, unfinished Continue and final-driven Goal/Loop.
  * Their durable owners retain text/decision debt; this projection elects one source per
  * chat and shares its reload budget. A reload never generates a second obligation. */
-async function owedPickups(now: number): Promise<Map<string, { conversationId: string; sessionId: string; replyId: string; acceptedAt: number; listenUntil: number; pro: boolean; queued: boolean }>> {
-  const owed = new Map<string, { conversationId: string; sessionId: string; replyId: string; acceptedAt: number; listenUntil: number; pro: boolean; queued: boolean }>();
+async function owedPickups(now: number): Promise<Map<string, { conversationId: string; sessionId: string; replyId: string; acceptedAt: number; listenUntil: number; pro: boolean; timer: number; queued: boolean }>> {
+  const owed = new Map<string, { conversationId: string; sessionId: string; replyId: string; acceptedAt: number; listenUntil: number; pro: boolean; timer: number; queued: boolean }>();
   for (const reply of pendingGoalReplies(now)) {
     const pending = goalPendingReplyFor(reply.conversationId);
     if (!pending) continue;
@@ -7264,10 +7302,13 @@ async function owedPickups(now: number): Promise<Map<string, { conversationId: s
     const current = goalPendingReplyFor(reply.conversationId);
     if (current?.replyId !== pending.replyId || current.acceptedAt !== pending.acceptedAt) continue;
     owed.set(reply.conversationId, { ...reply, replyId: source,
-      listenUntil: pending.listenUntil ?? 0, pro: loopAfterTurnFor(reply.conversationId), queued: false });
+      listenUntil: pending.listenUntil ?? 0, pro: loopAfterTurnFor(reply.conversationId),
+      timer: loopTimerMsFor(reply.conversationId), queued: false });
   }
+  // Authored input has no Loop cadence of its own: its pickup is a stall recovery whatever
+  // the chat's Goal/Loop mode is, so a queued message never inherits the timer.
   for (const input of await pendingQueuedPickups()) owed.set(input.conversationId,
-    { ...input, replyId: input.sourceTurnId, queued: true });
+    { ...input, replyId: input.sourceTurnId, timer: 0, queued: true });
   for (const [id, pickup] of owed) {
     const session = await getSession(pickup.sessionId);
     if (now - pickup.acceptedAt >= PICKUP_WATCH_LIFETIME_MS || session?.conversationId !== id ||
@@ -7293,15 +7334,31 @@ async function inspectOwedPickups(now: number): Promise<boolean> {
   for (const reply of owed.values()) {
     const session = await getSession(reply.sessionId);
     if (session?.conversationId !== reply.conversationId || isChatBlocked(reply.conversationId) ||
-        stopRequestedFor(reply.conversationId) || await conversationWasSuperseded(reply.conversationId) ||
-        continuationForSession(reply.sessionId)) continue;
+        stopRequestedFor(reply.conversationId) || await conversationWasSuperseded(reply.conversationId)) continue;
     if (pickupWatchFloor !== floor) return queued;
     let watch = pickupWatch.get(reply.conversationId);
     if (!watch || watch.replyId !== reply.replyId) {
       watch = { replyId: reply.replyId, attempts: 0,
         expiresAt: reply.acceptedAt + PICKUP_WATCH_LIFETIME_MS,
-        dueAt: Math.max(reply.acceptedAt, floor) + PICKUP_BACKOFF_MS[0] };
+        dueAt: Math.max(reply.acceptedAt, floor) + (reply.timer > 0 ? reply.timer : PICKUP_BACKOFF_MS[0]),
+        timer: reply.timer };
       pickupWatch.set(reply.conversationId, watch);
+    }
+    // A compaction owns the frontend while it runs: the chat is being replaced, so a reload
+    // here would race the rebind rather than collect anything. The ordinary watch keeps its
+    // arming point and simply waits for the ticket to clear, and paying part of a compaction's
+    // lifetime out of its own schedule is exactly why the pickup ladder is unchanged by one.
+    //
+    // A Loop timer is the one case that also re-arms, and that is why this exclusion is worth
+    // handling here rather than being left unstated. Its interval means "wait this long once
+    // the chat is free again", and a rebind easily outlasts a short one: a deadline that
+    // expired mid-compaction would otherwise fire the instant the replacement chat appeared,
+    // the exact opposite of taking the compaction into account. Measuring a fresh interval
+    // from here is the same dwell the user configured, started at the only moment it could
+    // actually have begun.
+    if (continuationForSession(reply.sessionId)) {
+      if (watch.timer > 0) watch.dueAt = Math.max(watch.dueAt, now + watch.timer);
+      continue;
     }
     if (now < watch.dueAt || now < reply.listenUntil) continue;
     if (!reply.queued && goalDraftBusy(reply.conversationId)) {
@@ -7314,7 +7371,7 @@ async function inspectOwedPickups(now: number): Promise<boolean> {
     if (!queueBrowserRecovery(reply.conversationId, reply.sessionId,
       `goal:${reply.replyId}:${watch.attempts}`, 'goal', 0, now)) continue;
     watch.attempts += 1;
-    watch.dueAt = now + PICKUP_BACKOFF_MS[Math.min(watch.attempts, PICKUP_BACKOFF_MS.length - 1)]!;
+    watch.dueAt = now + pickupGapFor(watch, watch.attempts);
     queued = true;
     logInfo(`bridge: next automation/input step uncollected in ${reply.conversationId} — reload ${watch.attempts}`);
   }
