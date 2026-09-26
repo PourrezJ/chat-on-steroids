@@ -241,7 +241,7 @@ interface Reply {
 function request(
   method: string,
   path: string,
-  options: { body?: unknown; origin?: string | null; auth?: string | null; raw?: string; extensionVersion?: string; protocol?: number } = {}
+  options: { body?: unknown; origin?: string | null; auth?: string | null; raw?: string; extensionVersion?: string; protocol?: number | null } = {}
 ): Promise<Reply> {
   const url = new URL(path, base);
   const payload = options.raw ?? (options.body === undefined ? null : JSON.stringify(options.body));
@@ -250,7 +250,7 @@ function request(
   // across incompatible app/extension builds instead of provisioning a token that can
   // only produce confusing downstream failures.
   headers['x-extension-version'] = options.extensionVersion ?? APP_VERSION;
-  headers['x-extension-protocol'] = String(options.protocol ?? BRIDGE_PROTOCOL);
+  if (options.protocol !== null) headers['x-extension-protocol'] = String(options.protocol ?? BRIDGE_PROTOCOL);
   if (payload !== null) {
     headers['content-type'] = 'application/json';
     headers['content-length'] = String(Buffer.byteLength(payload));
@@ -492,14 +492,31 @@ describe('who is allowed to talk to it', () => {
       const hello = await request('GET', '/hello', options);
       expect(hello.body.compatible).toBe(false);
       expect(changed).toHaveBeenCalledTimes(1);
-      expect(await bridgeStatus()).toMatchObject({ extensionVersion: '0.0.1', present: false, lastSeenAt: null });
+      expect(await bridgeStatus()).toMatchObject({ extensionVersion: '0.0.1', extensionCompatible: false, present: false, lastSeenAt: null });
+      await request('GET', '/hello', { auth: null, extensionVersion: '0.0.1', protocol: null });
+      expect(await bridgeStatus()).toMatchObject({ extensionVersion: '0.0.1', extensionCompatible: false });
+      expect(changed).toHaveBeenCalledTimes(1);
       const rejected = await request('POST', '/pair', options);
       expect(rejected.status).toBe(426);
       expect(changed).toHaveBeenCalledTimes(1);
       await request('GET', '/hello', { ...options, extensionVersion: '0.0.2' });
       expect(changed).toHaveBeenCalledTimes(2);
-      expect(await bridgeStatus()).toMatchObject({ extensionVersion: '0.0.2', present: false, paired: false });
+      expect(await bridgeStatus()).toMatchObject({ extensionVersion: '0.0.2', extensionCompatible: false, present: false, paired: false });
     } finally { unsubscribe(); }
+  });
+
+  it('accepts an older extension release when it speaks the current bridge protocol', async () => {
+    const older = { auth: null, extensionVersion: '0.0.1', protocol: BRIDGE_PROTOCOL };
+    const hello = await request('GET', '/hello', older);
+    expect(hello.body.compatible).toBe(true);
+    const paired = await request('POST', '/pair', older);
+    expect(paired.status).toBe(200);
+    token = paired.body.token as string;
+    expect(await bridgeStatus()).toMatchObject({
+      extensionVersion: '0.0.1',
+      extensionCompatible: true,
+      present: true
+    });
   });
 
   it('binds a loopback port only', () => {
@@ -1266,6 +1283,51 @@ describe('activity feed', () => {
       conversationId,
       attribution: 'request_id'
     });
+  });
+
+  /**
+   * A stream origin has no message to name, and that is not a defect in it.
+   *
+   * It is read off the `/f/conversation` SSE body before ChatGPT has mounted anything, so the page
+   * sends `messageId: null` by construction. This route reads only `requestId` — it never looks at
+   * the message — but the parser required one anyway, so every stream-derived id was dropped
+   * silently and the route answered `bad_request_evidence` with no log line.
+   *
+   * Measured on the live page and reported in #393: the origin was published up to eighteen
+   * seconds *before* the call arrived and still counted for nothing. The call waited out the full
+   * twenty-second identity window, was filed under Unattributed activity, and the bridge then
+   * reloaded the tab looking for the evidence it had already been given and thrown away.
+   * `identity_ms` 15001 -> 2 after the fix.
+   */
+  it('registers a stream origin the page cannot yet name a message for', async () => {
+    await pair();
+    const conversationId = '17171717-3939-6161-8383-959595959595';
+    const requestId = '11111111-2222-4333-8444-555555555555';
+    const mapped = await request('POST', '/correlations', {
+      body: { conversationId, calls: [{ messageId: null, requestId, createTime: Date.now() / 1000 }] }
+    });
+    expect(mapped.status, 'the stream origin was refused').toBe(200);
+    expect(mapped.body).toMatchObject({ ok: true, conversationId, confirmed: [requestId], complete: true });
+  });
+
+  /**
+   * Two stream origins in one batch are two ids, not one duplicate. Dedup keys on the message
+   * when there is one and on the request id when there is not; keying both on an absent message
+   * would have collapsed every stream row in a batch into the first.
+   */
+  it('keeps two stream origins apart when neither names a message', async () => {
+    await pair();
+    const conversationId = '18181818-4040-6262-8484-969696969696';
+    const first = '21111111-2222-4333-8444-555555555555';
+    const second = '31111111-2222-4333-8444-555555555555';
+    const mapped = await request('POST', '/correlations', {
+      body: { conversationId, calls: [
+        { messageId: null, requestId: first, createTime: Date.now() / 1000 },
+        { messageId: null, requestId: second, createTime: Date.now() / 1000 }
+      ] }
+    });
+    expect(mapped.status).toBe(200);
+    expect((mapped.body as { confirmed: string[] }).confirmed.sort()).toEqual([first, second].sort());
   });
 
   it('still refuses correlation evidence that names no request id at all', async () => {
@@ -2430,11 +2492,12 @@ describe('automatic compaction', () => {
   });
 
   /**
-   * Before the prompt has reached ChatGPT the pickup is a two-minute clock with five raised
-   * reloads, and a ticket that still has not been sent after them is abandoned: nothing was
-   * fenced, and the next working turn opens a fresh one. Every pickup asks for the tab in front.
+   * Before the prompt has reached ChatGPT the pickup starts on a two-minute clock. Exhausting
+   * that first browser-recovery budget is not terminal authority for an automatic ticket: a
+   * responsive source may have spent the whole interval draining local/native work. The exact
+   * token survives and retries on a slower cadence until explicit policy/user/page evidence ends it.
    */
-  it.each([false, true])('reloads an unsent automatic ticket every 2 minutes with bounded attempts (restored: %s)', async restored => {
+  it.each([false, true])('retains an unsent automatic ticket after its first pickup budget and retries after backoff (restored: %s)', async restored => {
     vi.useFakeTimers();
     try {
       await pair();
@@ -2476,8 +2539,13 @@ describe('automatic compaction', () => {
 
       await vi.advanceTimersByTimeAsync(2 * 60_000);
       expect(await takeRepair()).toBeNull();
-      expect(continuationByToken(token)).toMatchObject({ state: 'aborted', error: 'handoff_never_sent' });
-      expect(continuationForSession(filed.body.sessionId as string)).toBeNull();
+      expect(continuationByToken(token)).toMatchObject({ automatic: true, state: 'awaiting-summary' });
+      expect(continuationForSession(filed.body.sessionId as string)?.token).toBe(token);
+
+      await vi.advanceTimersByTimeAsync(10 * 60_000 - 1);
+      expect(await takeRepair()).toBeNull();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(await takeRepair()).toMatchObject({ conversationId, reason: 'compaction', focus: true });
     } finally {
       vi.useRealTimers();
     }
@@ -5054,6 +5122,41 @@ describe('delivering a bootstrap', () => {
     expect(pendingWorkerRevivals()[0]?.text).toContain('inspect the parser');
   });
 
+  it('does not hand a slept worker its dead turn, nor count its replayed native rows as work', async () => {
+    // Measured 2026-09-26 (worker-8): a turn left open the day before was adopted by the reopened
+    // tab, which refused the wake as "generating" until a ten-minute stall, and its native rows —
+    // keyed `thought-<id>-0` by the old renderer, `<id>` by the new shell — replayed as new output.
+    await pair();
+    spawn({ workers: [{ task: 'survive the renderer switch' }], caller: { conversationId: PRIME_CHAT } });
+    const workerConversation = 'cafe0926-0000-4000-8000-000000000926';
+    expect(bindConversation('worker-1', workerConversation)).toBe(true);
+    const start = Date.now();
+    await recordChatObservations(workerConversation, [
+      { kind: 'turn_start', time: start, turnId: 'g-dead-turn' },
+      { kind: 'page_tool', time: start + 1, turnId: 'g-dead-turn', messageId: 'thought-259c5310-0',
+        text: 'Audited Startpage configuration', activeNow: true }
+    ], 'worker-1');
+    expect(workerConversationGone(workerConversation)).toBe(true);
+    const worker = () => swarmStateForCaller({ conversationId: PRIME_CHAT }).agents.find((agent) => agent.id === 'worker-1')!;
+    const lastWorkAt = Math.max(worker().activatedAt ?? 0, worker().lastSeenAt ?? 0);
+    stageMessages({ conversationId: PRIME_CHAT }, [{ to: 'worker-1', text: 'continue the consolidation' }]).commit();
+    expect(await sweepStaleSwarm(lastWorkAt + WORKER_SILENCE_MS + 1_000)).toBe(true);
+    expect(worker().state).toBe('waking');
+    const sleptAt = worker().sleptAt!;
+
+    const activity = (await request('GET', `/activity?conversationId=${workerConversation}`)).body;
+    expect(activity.activeTurnId).toBeNull();
+    expect(activity.recordedTurnId).toBeNull();
+
+    expect((await request('POST', '/events', { body: { conversationId: workerConversation, events: [
+      { kind: 'page_tool', time: sleptAt + 5_000, turnId: 'g-dead-turn', messageId: '259c5310',
+        text: 'Audited Startpage configuration', activeNow: true }
+    ] } })).status).toBe(200);
+    // Still waiting for the wake to be typed, not "revived" by its own history.
+    expect(worker().state).toBe('waking');
+    expect(pendingWorkerRevivals()[0]?.text).toContain('continue the consolidation');
+  });
+
   it('still releases worker capacity when the durable prime turn remains open', async () => {
     spawn({ workers: [{ task: 'open turn veto' }], caller: { conversationId: PRIME_CHAT } });
     const workerConversation = 'stale-worker-open-prime';
@@ -7203,6 +7306,77 @@ describe('unattributed activity recovery', () => {
         expect((await input.listInputs()).filter(row => row.sessionId === session.id && row.recovery)).toEqual([]);
       }
     } finally { await writeDurableNow('session-input', []); input.resetInputForTests(); vi.useRealTimers(); await saveConfig(previous); }
+  });
+
+  /**
+   * A thinking turn is not a silent one.
+   *
+   * The silence window is chosen by model family — Pro gets ten minutes, everything else two — and
+   * a reasoning effort of `high` or above is legitimately quiet for far longer than two minutes
+   * between tool calls. Until request attribution worked this never mattered: every silence path is
+   * gated on `turnHasMcpCall`, so while calls landed under Unattributed activity the watchdog never
+   * ran at all. Fixing attribution (#414) switched it on for the first time.
+   *
+   * Measured by @moderntanri in #393, twice in a single task: an Extra-high turn went quiet after a
+   * long render, `active chat silent for 2 minutes — asking the browser to reload` fired, the reload
+   * killed the streaming turn, and the Continue queued behind it was claimed and never delivered.
+   * Their workaround was to turn Automatic Continue off entirely, which gives up the feature to
+   * avoid the watchdog.
+   *
+   * So the window follows the effort that was actually observed. Deliberately not by widening
+   * `model === 'pro'`: Pro carries other rules — Continue eligibility among them — that must not
+   * extend to an ordinary model merely because it is thinking hard.
+   */
+  it.each(['xhigh', 'max', 'ultra'] as const)('gives a %s reasoning turn the long silence window, not two minutes', async effort => {
+    const previous = getConfig();
+    await saveConfig({ ...previous, ui: { ...previous.ui, autoContinue: true } });
+    vi.useFakeTimers();
+    try {
+      await pair();
+      const chat = randomUUID(), turnId = `thinking-${effort}`;
+      await events(chat, [
+        { kind: 'user_message', messageId: 'question', text: 'Do the long analysis', time: Date.now(), authoredNow: true },
+        { kind: 'model_selection', model: 'GPT-5.6 Sol', reasoningEffort: effort, time: Date.now() },
+        openTurn(turnId)
+      ]);
+      await attributed(chat, false, Date.now());
+
+      // Two minutes of quiet is an ordinary pause for this turn, not a dead page.
+      await vi.advanceTimersByTimeAsync(CHAT_SILENCE_MS + 30_000);
+      await sweepStaleSwarm(Date.now());
+      expect(await maintenance(), `a ${effort} turn was reloaded mid-thought`).toBeNull();
+
+      // The watchdog still exists: the Pro window applies, and past it the reload is offered.
+      await vi.advanceTimersByTimeAsync(PRO_SILENCE_MS);
+      await sweepStaleSwarm(Date.now());
+      expect(await maintenance(), `a ${effort} turn was never recovered at all`)
+        .toMatchObject({ conversationId: chat, reason: 'silence' });
+    } finally { vi.useRealTimers(); await saveConfig(previous); }
+  });
+
+  /**
+   * The control, and `high` is the one that matters in it: `high` is the ordinary effort for the
+   * current models and every other test here uses it as the plain non-Pro case. Widening it would
+   * be the opposite mistake — a genuinely dead page waiting ten minutes instead of two.
+   */
+  it.each(['medium', 'high'] as const)('keeps the two-minute silence window for %s, the ordinary effort', async effort => {
+    const previous = getConfig();
+    await saveConfig({ ...previous, ui: { ...previous.ui, autoContinue: true } });
+    vi.useFakeTimers();
+    try {
+      await pair();
+      const chat = randomUUID();
+      await events(chat, [
+        { kind: 'user_message', messageId: 'question', text: 'Quick question', time: Date.now(), authoredNow: true },
+        { kind: 'model_selection', model: 'GPT-5.6 Sol', reasoningEffort: effort, time: Date.now() },
+        openTurn(`ordinary-${effort}`)
+      ]);
+      await attributed(chat, false, Date.now());
+      await vi.advanceTimersByTimeAsync(CHAT_SILENCE_MS + 30_000);
+      await sweepStaleSwarm(Date.now());
+      expect(await maintenance(), 'an ordinary turn lost its two-minute watchdog')
+        .toMatchObject({ conversationId: chat, reason: 'silence' });
+    } finally { vi.useRealTimers(); await saveConfig(previous); }
   });
 
   it.each(['normal', 'pro'] as const)('keeps the %s silence countdown and reload valid across same-turn corrections', async model => {
@@ -10690,6 +10864,125 @@ describe('the goal loop over the bridge', () => {
     resetGoalStateForTests();
   });
 
+  /**
+   * A chat's own workers report back into that same chat, so its next automatic Goal step must
+   * not be decided from a context that is about to change. One rule decides that, in the module
+   * that owns worker state; the pickup tree asks it by deferring the reload rather than spending
+   * it, and both surfaces describe the same wait. Off, everything below is exactly what it was.
+   */
+  it.each([true, false] as const)('waits for this chat’s own workers only when the setting asks (waitForSubAgents=%s)', async waiting => {
+    vi.useFakeTimers();
+    try {
+      await pair();
+      const chat = 'cafe0093-0000-4000-8000-000000000093';
+      const workerChat = 'cafe0094-0000-4000-8000-000000000094';
+      const previous = getConfig();
+      await saveConfig({ ...previous, goal: { ...previous.goal, enabled: true, mode: 'goal' },
+        multiAgent: { ...previous.multiAgent, enabled: true, waitForSubAgents: waiting, recoverAgentTabs: false } });
+      const recorded = await request('POST', '/events', { body: { conversationId: chat, events: [
+        { kind: 'user_message', time: Date.now(), text: 'keep going', messageId: 'm-wait-user' },
+        { kind: 'turn_start', time: Date.now(), turnId: 'g-wait' },
+        { kind: 'turn_end', time: Date.now(), turnId: 'g-wait', outcome: 'completed' },
+        { kind: 'assistant_message', time: Date.now(), turnId: 'g-wait', messageId: 'a-wait', text: 'First half done.',
+          state: 'final', final: true, goalEligible: true, activeNow: true }
+      ] } });
+      const sessionId = recorded.body.sessionId as string;
+      expect(goalPendingReplyFor(chat)).not.toBeNull();
+      spawn({ workers: [{ task: 'carry the second half of this chat’s work' }], caller: { conversationId: chat } });
+      expect(bindConversation('worker-1', workerChat)).toBe(true);
+
+      const held = { reason: 'workers' }, settling = { reason: 'settling' };
+      expect((await sessionControlsFor(sessionId)).goalWait).toEqual(waiting ? held : settling);
+      expect((await request('GET', `/activity?conversationId=${chat}`)).body.goal.wait)
+        .toEqual(waiting ? held : settling);
+
+      // A wait is a delay, never a spent step: the debt is untouched, so the sweep after the
+      // last worker stops still finds it owed with the whole backoff ahead of it.
+      await vi.advanceTimersByTimeAsync(120_001);
+      await sweepStaleSwarm(Date.now());
+      const firstSweep = ((await request('GET', '/status')).body.repairs ?? []).filter((row: any) => row.conversationId === chat);
+      expect(firstSweep).toEqual(waiting ? [] : [expect.objectContaining({ conversationId: chat, reason: 'goal' })]);
+
+      finishAgent({ conversationId: workerChat }, 'second half done');
+      expect((await sessionControlsFor(sessionId)).goalWait).not.toEqual(held);
+      await vi.advanceTimersByTimeAsync(120_001);
+      await sweepStaleSwarm(Date.now());
+      expect((await request('GET', '/status')).body.repairs ?? [])
+        .toEqual(expect.arrayContaining([expect.objectContaining({ conversationId: chat, reason: 'goal' })]));
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('never lets another chat’s sub-agents hold this one', async () => {
+    vi.useFakeTimers();
+    try {
+      await pair();
+      const chat = 'cafe0095-0000-4000-8000-000000000095';
+      const stranger = 'cafe0096-0000-4000-8000-000000000096';
+      const previous = getConfig();
+      await saveConfig({ ...previous, goal: { ...previous.goal, enabled: true, mode: 'goal' },
+        multiAgent: { ...previous.multiAgent, enabled: true, waitForSubAgents: true, recoverAgentTabs: false } });
+      const recorded = await request('POST', '/events', { body: { conversationId: chat, events: [
+        { kind: 'user_message', time: Date.now(), text: 'keep going', messageId: 'm-stranger-user' },
+        { kind: 'turn_start', time: Date.now(), turnId: 'g-stranger' },
+        { kind: 'turn_end', time: Date.now(), turnId: 'g-stranger', outcome: 'completed' },
+        { kind: 'assistant_message', time: Date.now(), turnId: 'g-stranger', messageId: 'a-stranger', text: 'First half done.',
+          state: 'final', final: true, goalEligible: true, activeNow: true }
+      ] } });
+      const sessionId = recorded.body.sessionId as string;
+      spawn({ workers: [{ task: 'belongs to somebody else entirely' }], caller: { conversationId: stranger } });
+      expect(bindConversation('worker-1', 'cafe0097-0000-4000-8000-000000000097')).toBe(true);
+
+      expect((await sessionControlsFor(sessionId)).goalWait).toEqual({ reason: 'settling' });
+      await vi.advanceTimersByTimeAsync(120_001);
+      await sweepStaleSwarm(Date.now());
+      expect((await request('GET', '/status')).body.repairs ?? [])
+        .toEqual(expect.arrayContaining([expect.objectContaining({ conversationId: chat, reason: 'goal' })]));
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('lets a configured Loop timer run past its own sub-agents', async () => {
+    vi.useFakeTimers();
+    try {
+      await pair();
+      const chat = 'cafe0098-0000-4000-8000-000000000098';
+      const workerChat = 'cafe0100-0000-4000-8000-000000000100';
+      const previous = getConfig();
+      await saveConfig({ ...previous, goal: { ...previous.goal, enabled: true, mode: 'loop', loopTimerMinutes: 5 },
+        multiAgent: { ...previous.multiAgent, enabled: true, waitForSubAgents: true, recoverAgentTabs: false } });
+      await request('POST', '/events', { body: { conversationId: chat, events: [
+        { kind: 'model_selection', model: 'GPT-5.6 Sol', reasoningEffort: 'high', time: Date.now() },
+        { kind: 'user_message', time: Date.now(), text: 'keep going', messageId: 'm-timer-workers' }
+      ] } });
+      const sessionId = (await request('GET', `/activity?conversationId=${chat}`)).body.sessionId;
+      const { recordLoopMcpProof } = await import('./goal-mcp-proof.js');
+      await recordLoopMcpProof(sessionId, 'g-timer-workers');
+      await recordFinalForTest(chat, 'g-timer-workers');
+      const accepted = Date.now();
+      await acceptGoalReplyNow({ conversationId: chat, sessionId, replyId: 'timer-workers-final',
+        turnId: 'g-timer-workers', eventSeq: 100, blocked: false });
+      expect(goalPendingReplyFor(chat)).not.toBeNull();
+      spawn({ workers: [{ task: 'work the timer deliberately does not wait for' }], caller: { conversationId: chat } });
+      expect(bindConversation('worker-1', workerChat)).toBe(true);
+
+      // The setting asks for the hold and the family is busy — a timer chat still never
+      // reports the deadline-less worker wait, even before its watch is armed.
+      expect((await sessionControlsFor(sessionId)).goalWait).toEqual({ reason: 'settling' });
+
+      // The sweep arms the cadence instead of deleting the debt that hold would take.
+      await sweepStaleSwarm(Date.now());
+      expect((await sessionControlsFor(sessionId)).goalWait).toEqual({ reason: 'timer', until: accepted + 5 * 60_000 });
+
+      // And it fires on schedule with the workers still running: exactly one Goal reload,
+      // not the empty result the hold alone would leave.
+      await vi.advanceTimersByTimeAsync(5 * 60_000 + 1);
+      await sweepStaleSwarm(Date.now());
+      expect(((await request('GET', '/status')).body.repairs ?? [])
+        .filter((row: any) => row.conversationId === chat)).toEqual([
+        expect.objectContaining({ conversationId: chat, reason: 'goal' })
+      ]);
+    } finally { vi.useRealTimers(); }
+  });
+
   it('advertises the configured Loop helper rather than the inactive API model', async () => {
     await pair();
     const config = defaultConfig();
@@ -12581,6 +12874,76 @@ it('retires an already armed ordinary Goal repair when its conversation is now f
     await sweepStaleSwarm(Date.now());
     expect(((await request('GET', '/status')).body.repairs ?? []).filter((r: any) => r.conversationId === chat)).toEqual([]);
   } finally { resetGoalStateForTests(); await setSecret('openRouterApiKey', ''); await saveConfig(previous); vi.useRealTimers(); }
+});
+
+it('drives a Loop chat on the configured timer, immune to activity and deferred by a compaction', async () => {
+  const previous = getConfig();
+  vi.useFakeTimers();
+  try {
+    // Seven minutes, deliberately not one of the ordinary 2/5/10/15 rungs: a deadline that
+    // slid to a ladder value instead of the configured one is the regression this guards.
+    await saveConfig({ ...previous, goal: { ...previous.goal, enabled: true, mode: 'loop', loopTimerMinutes: 7 } });
+    await pair();
+    const chat = 'cafe0174-0000-4000-8000-000000000174';
+    const goalRepairs = async (): Promise<any[]> =>
+      ((await request('GET', '/status')).body.repairs ?? [])
+        .filter((row: any) => row.conversationId === chat && row.reason === 'goal');
+    await request('POST', '/events', { body: { conversationId: chat, events: [
+      { kind: 'model_selection', model: 'GPT-5.6 Sol', reasoningEffort: 'high', time: Date.now() },
+      { kind: 'user_message', time: Date.now(), text: 'keep going', messageId: 'm-loop-timer' }
+    ] } });
+    const sessionId = (await request('GET', `/activity?conversationId=${chat}`)).body.sessionId;
+    // A Loop decision owes its local proof first: mint the reply only after that proof exists.
+    const { recordLoopMcpProof } = await import('./goal-mcp-proof.js');
+    await recordLoopMcpProof(sessionId, 'g-timer');
+    await recordFinalForTest(chat, 'g-timer');
+    const accepted = Date.now();
+    await acceptGoalReplyNow({ conversationId: chat, sessionId, replyId: 'timer-final', turnId: 'g-timer', eventSeq: 100, blocked: false });
+    expect(goalPendingReplyFor(chat)).not.toBeNull();
+
+    // The first sweep arms one fresh interval from acceptance, not the 2-minute opening rung.
+    await sweepStaleSwarm(Date.now());
+    const armed = (await sessionControlsFor(sessionId)).goalWait;
+    expect(armed).toEqual({ reason: 'timer', until: accepted + 7 * 60_000 });
+
+    // Inside the interval nothing is owed: the ordinary ladder's first rung never fires.
+    await vi.advanceTimersByTimeAsync(60_000);
+    await sweepStaleSwarm(Date.now());
+    expect(await goalRepairs()).toEqual([]);
+    expect((await sessionControlsFor(sessionId)).goalWait).toEqual(armed);
+
+    // A compaction owns the frontend while it runs. The original deadline expires mid-rebind,
+    // so the timer must restart one fresh interval from the moment the chat is free again
+    // rather than fire into the replacement chat the instant it appears.
+    const continuation = await openContinuationNow(sessionId, chat);
+    await vi.advanceTimersByTimeAsync(7 * 60_000);
+    const duringCompaction = Date.now();
+    await sweepStaleSwarm(Date.now());
+    expect((await sessionControlsFor(sessionId)).goalWait).toEqual({ reason: 'timer', until: duringCompaction + 7 * 60_000 });
+    expect(await goalRepairs()).toEqual([]);
+    expect(abortContinuation(continuation.token, 'loop timer test')).toBe(true);
+
+    // The restarted interval is a full one: six of the fresh seven minutes still owe nothing,
+    // and only the seventh queues the reload.
+    await vi.advanceTimersByTimeAsync(6 * 60_000);
+    await sweepStaleSwarm(Date.now());
+    expect(await goalRepairs()).toEqual([]);
+    await vi.advanceTimersByTimeAsync(60_000);
+    await sweepStaleSwarm(Date.now());
+    expect(await goalRepairs()).toEqual([expect.objectContaining({ conversationId: chat, reason: 'goal' })]);
+
+    // Page activity is not a stall: the user named the interval, so native work must not
+    // push the next one out to a backoff rung.
+    const due = (await sessionControlsFor(sessionId)).goalWait;
+    expect(due?.reason).toBe('timer');
+    const probe = await request('POST', '/events', { body: { conversationId: chat, events: [
+      { kind: 'model_selection', model: 'GPT-5.6 Sol', reasoningEffort: 'high', time: Date.now() },
+      { kind: 'turn_start', turnId: 'g-timer-probe', time: Date.now() },
+      { kind: 'page_tool', turnId: 'g-timer-probe', messageId: 'timer-native-tool', text: 'Searching files', activeNow: true, time: Date.now() }
+    ] } });
+    expect(probe.status).toBe(200);
+    expect((await sessionControlsFor(sessionId)).goalWait).toEqual(due);
+  } finally { resetGoalStateForTests(); await saveConfig(previous); vi.useRealTimers(); }
 });
 
 it('preserves pending commands and durable ACK receipts across a port switch', async () => {

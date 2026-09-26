@@ -10,7 +10,7 @@ import { getConfig } from '../config.js';
 import { randomUUID } from 'node:crypto';
 import { userTitle } from './title.js';
 import { readDurable, writeDurableNow, writeDurableSoon } from '../durable.js';
-import { getSession, findSessionByConversation, createSession, deleteSession, rebindSession, conversationWasSuperseded, readRecentEvents, listUsageSessions, turnHasMcpCall, sessionDirectoryMissing, readCompletedFinal, readLatestUserMessage } from './store.js';
+import { getSession, findSessionByConversation, createSession, deleteSession, rebindSession, conversationWasSuperseded, readRecentEvents, listUsageSessions, turnHasMcpCall, questionHasMcpCall, sessionDirectoryMissing, readCompletedFinal, readLatestUserMessage } from './store.js';
 import { assignSessionProject, projectWorkspace, getSessionProject } from '../projects.js';
 import { isChatBlocked } from './blocked-chats.js';
 import { wakeBrowserWork } from '../browser-wake.js';
@@ -100,6 +100,8 @@ const entrySchema = inputArgs.extend({
 export type InputEntry = z.infer<typeof entrySchema>;
 const STATE = 'session-input';
 const TOOL_INPUT_TEXT_BYTES = 128000;
+/** A confirmed send receipt lands in seconds. This only bounds one that is never reported. */
+const UNCERTAIN_SEND_MS = 15 * 60_000;
 export const TOOL_INPUT_HEADER = '\n--- New instructions from the user ---\n';
 export interface ToolInputBatch {
   messages: Array<{ text: string; images: InputImage[] }>;
@@ -443,6 +445,15 @@ async function expireQueued(current: InputEntry[]): Promise<InputEntry[]> {
         ? 'Not sent: browser preparation timed out. This attempt was cancelled.'
         : 'Stopped waiting for delivery confirmation. The message may already have been sent; it will not be resent.' };
     }
+    // An authorized claim that never reports its outcome is already unsendable: a
+    // browser row past authorization is not preparable, so no path re-offers or
+    // replays it. Left in place it still owns its whole session, so every later
+    // message waits behind an outcome nobody will ever publish. Retire it visibly
+    // after a bounded wait. Automatic Continue, an opening's first send and a
+    // combined delivery keep their existing custody.
+    if (row.state === 'browser' && row.sendAuthorizedAt !== undefined && !row.recovery && !row.opening &&
+        !row.companionInputId && manualInput(row) && Date.now() - row.sendAuthorizedAt >= UNCERTAIN_SEND_MS)
+      return { ...row, state: 'cancelled', error: 'Stopped waiting for delivery confirmation. The message may already have been sent; it will not be resent.' };
     return row;
   }));
   for (let i = 0; i < next.length; i++) {
@@ -1045,7 +1056,7 @@ async function recoveryInvalidReason(row: InputEntry): Promise<string | null> {
   const [end] = await readRecentEvents(row.sessionId, 1, { kinds: ['turn_start', 'turn_end'] });
   if (end?.turnId !== boundary.turnId) return 'the recorded turn changed';
   if (end.kind === 'turn_end' && end.outcome === 'stopped') return 'the user stopped the turn';
-  if (!await turnHasMcpCall(row.sessionId, boundary.conversationId, boundary.turnId)) return 'the source has no confirmed local tool call';
+  if (!await questionHasMcpCall(row.sessionId, boundary.conversationId, boundary.turnId)) return 'the source has no confirmed local tool call';
   if (await readCompletedFinal(row.sessionId, boundary.conversationId)) return 'the complete answer arrived';
   const question = await readLatestUserMessage(row.sessionId, boundary.turnId);
   const [work] = await readRecentEvents(row.sessionId, 1, { kinds: RECOVERY_WORK_KINDS });
@@ -1056,25 +1067,45 @@ async function recoveryInvalidReason(row: InputEntry): Promise<string | null> {
   return (await getSession(row.sessionId))?.conversationId === boundary.conversationId ? null : 'the session moved to another chat';
 }
 
+const recoveryRefusalsTold = new Set<string>();
+
 /** Shared unfinished-response ticket; mode policy belongs to the bridge hook. */
 export function fileRecoveryInput(sessionId: string, conversationId: string, turnId: string, pro: boolean,
   currentOwner: () => boolean, busyUntil = Date.now() + recoveryBusyMs(pro), episode = `turn:${turnId}`): Promise<boolean> {
+  // Every refusal says why, once per turn and reason. Silent refusals cost a stopped chat its
+  // only automatic restart with nothing anywhere naming the cause (2026-09-26: a prime's restart
+  // was refused twice and the log said only that the chat had stopped).
+  const refused = (why: string): false => {
+    const key = `${conversationId}:${turnId}:${why}`;
+    if (!recoveryRefusalsTold.has(key)) {
+      recoveryRefusalsTold.add(key);
+      if (recoveryRefusalsTold.size > 500) recoveryRefusalsTold.delete(recoveryRefusalsTold.values().next().value!);
+      logInfo(`input: automatic Continue for ${conversationId} not filed — ${why} (turn ${turnId})`);
+    }
+    return false;
+  };
   return serial(async () => {
     const current = await load();
     // Never overtake authored input, retry an ambiguous send, or reuse a spent source.
-    if (current.some(row => row.sessionId === sessionId && !terminal(row))) return false;
+    if (current.some(row => row.sessionId === sessionId && !terminal(row))) return refused('an earlier message of this session is still awaiting delivery');
     const question = await readLatestUserMessage(sessionId, turnId);
     const [work] = await readRecentEvents(sessionId, 1, { kinds: RECOVERY_WORK_KINDS });
-    if (!question?.messageId || !work || !currentOwner()) return false;
+    if (!question?.messageId) return refused('the session has no recorded question to continue');
+    if (!work) return refused('the session has no recorded work to continue');
+    if (!currentOwner()) return false;
     if (current.some(row => row.sessionId === sessionId && row.recovery && row.silenceBoundary?.turnId === turnId &&
-        (!row.recovery.episode || row.recovery.episode === episode || row.sendAuthorizedAt !== undefined))) return false;
+        (!row.recovery.episode || row.recovery.episode === episode || row.sendAuthorizedAt !== undefined))) return refused('this turn already has its restart');
     const now = Date.now();
     const row: InputEntry = { id: randomUUID(), sessionId, conversationId, owner: null, state: 'queued',
       mode: 'after-turn', dueAt: now, createdAt: now, model: null, reasoningEffort: null,
       text: recoveryMessage(),
       recovery: { questionId: question.messageId, episode, pro, busyUntil, phase: 'ready' },
       silenceBoundary: { turnId, conversationId, workSeq: workSequence(work), acceptedAt: now } };
-    if (!await recoveryCurrent(row) || !currentOwner()) return false;
+    if (!await recoveryCurrent(row)) {
+      const why = await recoveryInvalidReason(row);
+      return refused(why ?? 'a local tool call is still running');
+    }
+    if (!currentOwner()) return false;
     await commit(append(current, row));
     return true;
   });

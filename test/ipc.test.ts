@@ -469,6 +469,8 @@ describe('explicit settings replace the published tool contract', () => {
     };
     try {
       const before = snapshot();
+      const beforeState = await handlers.get('state:get')!(null, undefined) as any;
+      expect(beforeState.data.connectorSchemas.core).toBe(before.schemaId);
       const tool = kind === 'finish' ? 'session_finish' : 'exec_command';
       expect(before.tools.map(row => row.name)).toContain(tool);
       expect(before.tools.map(row => row.name)).not.toContain('session');
@@ -478,6 +480,8 @@ describe('explicit settings replace the published tool contract', () => {
         : { capabilities: { ...current.capabilities, command: false } }) };
       expect((await save(patch)).ok).toBe(true);
       const after = snapshot();
+      const afterState = await handlers.get('state:get')!(null, undefined) as any;
+      expect(afterState.data.connectorSchemas.core).toBe(after.schemaId);
       expect(after.tools.map(row => row.name)).not.toContain(tool);
       expect(after.tools.map(row => row.name)).not.toContain('session');
       expect(after.schemaId).not.toBe(before.schemaId);
@@ -872,6 +876,39 @@ describe('settings writes from more than one UI', () => {
     expect(reply.ok, reply.error).toBe(true);
     expect(getConfig().ui.minimizeToTray).toBe(!base.ui.minimizeToTray);
     expect(getConfig().multiAgent.recoverAgentTabs).toBe(false);
+  });
+
+  /**
+   * The Loop timer is a delivery cadence, so it crosses the same boundary as the other Goal
+   * numbers: validated here, merged field-wise, and never undoable by a stale form snapshot.
+   * 720 is the ceiling on purpose — the reply obligation it collects expires at twelve hours,
+   * so a longer interval could never fire.
+   */
+  it('round-trips the Loop timer and preserves a newer value across a stale renderer save', async () => {
+    const base = defaultConfig();
+    await saveConfig(base);
+
+    expect(base.goal.loopTimerMinutes).toBe(0);
+    const selected = await save({ ...base, goal: { ...base.goal, loopTimerMinutes: 12 } }, base);
+    expect(selected.ok, selected.error).toBe(true);
+    expect(getConfig().goal.loopTimerMinutes).toBe(12);
+    expect(JSON.parse(await fs.readFile(path.join(dir, 'config.json'), 'utf8')).goal.loopTimerMinutes).toBe(12);
+
+    // The extension switches the timer off after the renderer captured `base` for an unrelated
+    // edit. The form field was never touched, so it must not resurrect the old value.
+    await saveConfig({ ...base, goal: { ...base.goal, loopTimerMinutes: 0 } });
+    const stale = await save({ ...base, ui: { ...base.ui, minimizeToTray: !base.ui.minimizeToTray } }, base);
+    expect(stale.ok, stale.error).toBe(true);
+    expect(getConfig().goal.loopTimerMinutes).toBe(0);
+    expect(getConfig().ui.minimizeToTray).toBe(!base.ui.minimizeToTray);
+
+    const current = getConfig();
+    expect((await save({ ...current, goal: { ...current.goal, loopTimerMinutes: 720 } }, current)).ok).toBe(true);
+    expect(getConfig().goal.loopTimerMinutes).toBe(720);
+    for (const minutes of [-1, 721, 1.5]) {
+      expect((await save({ ...current, goal: { ...current.goal, loopTimerMinutes: minutes } }, current)).ok).toBe(false);
+    }
+    expect(getConfig().goal.loopTimerMinutes).toBe(720);
   });
 });
 

@@ -246,6 +246,24 @@ export interface GoalProviderSettings {
 export interface GoalSettings {
   /** Optional active-turn Goal impulses; zero disables them. */
   impulseMinutes?: number;
+  /**
+   * Fixed delay, in minutes, between one finished Loop answer and the next automatic message.
+   *
+   * Zero is Off, which is the shipped default: the ordinary schedule waits on evidence of a
+   * stalled pickup and backs off 2, 5, 10 then 15 minutes. A timer replaces that ladder with
+   * the interval the user asked for, and — because the whole point is a steady cadence rather
+   * than a stall recovery — page activity does not push the next one out. It applies to Loop
+   * only: Goal exists to decide that no further message is needed, so a fixed cadence would
+   * contradict what it is for.
+   *
+   * This is a dwell time, not a poll. The existing reply obligation, its source question and
+   * its twelve-hour lifetime still govern whether anything is owed at all, and a compaction in
+   * progress still owns its own cadence and keeps the timer from firing into a rebind.
+   *
+   * It also overrides the finish-only preference, which would otherwise hold the chat back for
+   * a finish call this cadence has no reason to expect. See `astraFinishOnly`.
+   */
+  loopTimerMinutes?: number;
   /** Include tool details in handoff briefs only; Goal/Loop always use authored conversation text. */
   includeToolCalls?: boolean;
   helperModel?: string;
@@ -303,6 +321,12 @@ export interface MultiAgentSettings {
    * recovered, whatever this says.
    */
   recoverAgentTabs: boolean;
+  /**
+   * Hold a Goal/Loop chat's next automatic step until the workers it delegated to have
+   * stopped. Their reports land in the same chat, so deciding or sending before that reads a
+   * context that is about to change. Off by default; a chat with no workers is never held.
+   */
+  waitForSubAgents?: boolean;
 }
 
 /** The user's own additions to what each MCP connector tells the model about itself. */
@@ -474,6 +498,12 @@ export interface BridgeStatus {
   /** Epoch ms of the last message from the extension, or null. */
   lastSeenAt: number | null;
   /**
+   * Compatibility of the last extension protocol observed by this app process.
+   * Null means no protocol has been observed yet. This, not release semver, decides
+   * whether the companion can use the current bridge contract.
+   */
+  extensionCompatible?: boolean | null;
+  /**
    * Version of the connected browser extension, learned from its own authenticated requests.
    *
    * This is the only place that fact lives. It is null before an extension has ever spoken to
@@ -640,6 +670,12 @@ export function browserExtensionRequired(_config: Pick<Config, 'sessions' | 'mul
 export interface AppState {
   config: Config;
   status: ConnectionStatus;
+  /**
+   * Exact declaration fingerprints for connectors currently published by the local MCP server.
+   * Missing entries mean that surface is not published right now. These hashes describe the
+   * local contract only; they are not evidence that ChatGPT has refreshed its cached tools.
+   */
+  connectorSchemas: Partial<Record<SurfaceId, string>>;
   platform: PlatformInfo;
   /** Only packaged Windows builds may change the login item. */
   loginStartupAvailable?: boolean;

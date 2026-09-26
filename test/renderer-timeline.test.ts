@@ -316,6 +316,29 @@ async function boot(events: SessionEvent[], selectExisting = true, pausedHelpers
   };
 }
 
+it('makes parent and worker session selectors keyboard-focusable and activates them with Enter/Space', async () => {
+  const parent: SessionSummary = { ...summary([]), id: 'parent-session', title: 'Parent', conversationId: 'parent-chat', chatIds: ['parent-chat'] };
+  const worker: SessionSummary = { ...summary([]), id: 'worker-session', title: 'Worker', conversationId: 'worker-chat', chatIds: ['worker-chat'],
+    origin: { kind: 'worker', fromSessionId: parent.id, agentId: 'worker-1', task: 'Inspect' } };
+  const { w } = await boot([], false, [], [], { sessions: [parent, worker] });
+  const parentControl = w.document.querySelector<HTMLElement>(`[data-id="${parent.id}"] [data-session-select]`)!;
+  expect(parentControl.getAttribute('role')).toBe('button');
+  expect(parentControl.tabIndex).toBe(0);
+  parentControl.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+  await settle();
+  expect(w.document.querySelector(`.sess.is-sel[data-id="${parent.id}"]`)).not.toBeNull();
+
+  (w.document.querySelector(`[data-id="${parent.id}"] .worker-toggle`) as HTMLButtonElement).click();
+  await settle();
+  const workerControl = w.document.querySelector<HTMLElement>(`[data-id="${worker.id}"] [data-session-select]`)!;
+  expect(workerControl.tabIndex).toBe(0);
+  const activate = new w.KeyboardEvent('keydown', { key: ' ', bubbles: true, cancelable: true });
+  workerControl.dispatchEvent(activate);
+  expect(activate.defaultPrevented).toBe(true);
+  await settle();
+  expect(w.document.querySelector(`.sess.is-sel[data-id="${worker.id}"]`)).not.toBeNull();
+});
+
 it('patches native reactions in place and hides streamed envelopes without changing authored messages', async () => {
   const user: SessionEvent = { kind: 'user_message', seq: 1, origin: 1, time: T0, source: 'extension', messageId: 'reaction-user', message: text('Question') };
   const answer: SessionEvent = { kind: 'assistant_message', seq: 2, time: T0 + 1, source: 'extension', messageId: 'reaction-answer', message: text('\uE200message_'), final: false };
@@ -2802,6 +2825,25 @@ it('shows Loop settling, its real waiting deadline, and generated text in the sa
   expect(row.textContent).toBe('');
 });
 
+it('names the wait for this chat’s own sub-agents without inventing a countdown', async () => {
+  const { w, append } = await boot([]);
+  const api = (w as any).api;
+  // The wait ends when the last worker stops, which is not a time this page can predict, so
+  // the row says what it is waiting for and shows no timer at all.
+  const controls = { automation: 'loop', objective: 'Continue the task', blocked: '', job: null,
+    goalWait: { reason: 'workers' }, goalDraft: null as unknown };
+  api.getSessionControls = async () => ({ ok: true, data: controls });
+  await append([]);
+  const row = w.document.getElementById('goalLifecycle')!;
+  expect(row.hidden).toBe(false);
+  expect(row.textContent).toContain('Loop · Waiting for this chat’s sub-agents');
+  expect(row.querySelector('[role="timer"]')).toBeNull();
+  expect(row.getAttribute('aria-busy')).toBe('true');
+  api.getSessionControls = async () => ({ ok: true, data: { ...controls, goalWait: null } });
+  await append([]);
+  expect(row.hidden).toBe(true);
+});
+
 it('follows the accepted New Chat receipt while preserving a typed follow-up', async () => {
   const { w, live, append } = await boot([], false);
   const composer = w.document.getElementById('chatInput') as HTMLTextAreaElement;
@@ -3057,6 +3099,24 @@ it('shows the immediate recovery deadline before a draft exists and clears it on
   goalWait = null;
   await append([]);
   expect(row.hidden).toBe(true);
+});
+
+it('shows the Loop timer as its own countdown instead of folding it into the shared recovery row', async () => {
+  const { w, append } = await boot([]);
+  const api = (w as any).api, original = api.getSessionControls;
+  const deadline = Date.now() + 120_000;
+  const goalWait: object = { reason: 'timer', until: deadline };
+  // The silence countdown at the very same instant would swallow a *shared* wait — the dock
+  // already describes it. A timer is the user's own interval, so it keeps its own row rather
+  // than deferring to a deadline that happens to coincide.
+  const recovery = [{ kind: 'silence', deadline, visibleAt: 0 }, { kind: 'pickup', deadline, visibleAt: 0 }];
+  api.getSessionControls = async (id: string) => ({ ok: true, data: { ...(await original(id)).data,
+    automation: 'loop', goalWait, recovery, goalDraft: null } });
+  await append([]);
+  const row = w.document.getElementById('goalLifecycle')!;
+  expect(row.hidden).toBe(false);
+  expect(row.textContent).toContain('Loop · Waiting for the Loop timer');
+  expect(row.querySelector('[role="timer"]')).not.toBeNull();
 });
 
 it.each([
@@ -3563,4 +3623,24 @@ it('keeps a cancelled automatic draft at its creation time as later messages arr
   await app.append([]);
   expect(timeline.textContent).not.toContain('Unused automatic instruction');
   expect(live.sent).toHaveLength(0);
+});
+
+it('keeps the latest recovery verdict in view until the chat works again', async () => {
+  // 2026-09-26: a stopped prime was explained only by timeline notes that scrolled away.
+  const verdict = 'Could not restart this chat automatically: the browser chat was closed. Send a message here to continue it.';
+  const app = await boot([
+    { seq: 1, time: T0 + 1000, source: 'extension', kind: 'turn_start', turnId: 'stalled' },
+    { seq: 2, time: T0 + 2000, source: 'extension', kind: 'turn_end', turnId: 'stalled', outcome: 'stalled' },
+    { seq: 3, time: T0 + 3000, source: 'app', kind: 'note', message: text(verdict) }
+  ] as SessionEvent[]);
+  const host = app.w.document.getElementById('recoveryStatus')!;
+  expect(host.hidden).toBe(false);
+  expect(host.textContent).toContain('Could not restart this chat automatically');
+  await app.append([{ seq: 4, time: T0 + 4000, source: 'extension', kind: 'turn_start', turnId: 'resumed' } as SessionEvent]);
+  expect(host.hidden).toBe(true);
+});
+
+it('does not show a handoff note as a recovery verdict', async () => {
+  const app = await boot([{ seq: 1, time: T0 + 1000, source: 'app', kind: 'note', continuation: TOKEN, message: text('Compact & Resume abandoned') }] as SessionEvent[]);
+  expect(app.w.document.getElementById('recoveryStatus')!.hidden).toBe(true);
 });

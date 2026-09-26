@@ -1,7 +1,18 @@
 /** Maximum editable Goal instruction size accepted by config and renderer IPC. */
 export const MAX_GOAL_SYSTEM_PROMPT_CHARS = 20_000;
 /** Presentation of an existing continuation gate; never grants send authority. */
-export type GoalWait = { reason: 'tools' | 'quiet' | 'silence' | 'listening' | 'native-busy' | 'settling'; until?: number };
+export type GoalWait = {
+  /**
+   * `workers` is the sub-agent hold: an owed step deliberately waiting for the run's own
+   * workers to stop. It has no deadline — the wait ends when the last worker stops, and a
+   * countdown would only be a second, guessed clock. A configured Loop timer bypasses it.
+   *
+   * `timer` is the fixed Loop cadence described by `GoalSettings.loopTimerMinutes`: an owed
+   * Loop decision the user asked to be delivered on a clock rather than on a stall.
+   */
+  reason: 'tools' | 'workers' | 'quiet' | 'silence' | 'listening' | 'native-busy' | 'settling' | 'timer';
+  until?: number;
+};
 /** Default API model, also used when switching back from a custom model namespace. */
 export const DEFAULT_GOAL_MODEL = 'z-ai/glm-5.3';
 

@@ -1676,6 +1676,213 @@ describe('a chat driven towards a specific goal', () => {
     expect(goal.goalViewFor('c-obj-restored')).toBeNull();
   });
 
+  it('serializes overlapping durable objective saves and publishes only after each commit', async () => {
+    const conversationId = 'c-obj-overlap';
+    goal.setGoalObjective(conversationId, 'previous objective');
+    const durable = await import('../src/main/durable.js');
+    const realWrite = durable.writeDurableNow;
+    let entered = (): void => undefined;
+    const firstEntered = new Promise<void>((resolve) => { entered = resolve; });
+    let release = (): void => undefined;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    let objectiveWrites = 0;
+    const write = vi.spyOn(durable, 'writeDurableNow').mockImplementation(async (name, value) => {
+      if (name === goal.GOAL_OBJECTIVES_STATE) {
+        objectiveWrites += 1;
+        if (objectiveWrites === 1) {
+          entered();
+          await held;
+        }
+      }
+      return realWrite(name, value);
+    });
+    try {
+      const first = goal.setGoalObjectiveNow(conversationId, 'first durable objective');
+      await firstEntered;
+      expect(goal.goalObjectiveFor(conversationId)).toBe('previous objective');
+
+      const second = goal.setGoalObjectiveNow(conversationId, 'second durable objective');
+      await Promise.resolve();
+      expect(objectiveWrites).toBe(1);
+      expect(goal.goalObjectiveFor(conversationId)).toBe('previous objective');
+
+      release();
+      expect(await first).toBe('first durable objective');
+      expect(await second).toBe('second durable objective');
+      expect(objectiveWrites).toBe(2);
+      expect(goal.goalObjectiveFor(conversationId)).toBe('second durable objective');
+    } finally {
+      write.mockRestore();
+    }
+  });
+
+  it('moves an objective save that is already inside its durable barrier to the replacement chat', async () => {
+    const fromConversationId = 'c-obj-inflight-move-from';
+    const toConversationId = 'c-obj-inflight-move-to';
+    goal.setGoalObjective(fromConversationId, 'previous objective');
+    const durable = await import('../src/main/durable.js');
+    const realWrite = durable.writeDurableNow;
+    let entered = (): void => undefined;
+    const writeEntered = new Promise<void>((resolve) => { entered = resolve; });
+    let release = (): void => undefined;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    let objectiveWrites = 0;
+    const write = vi.spyOn(durable, 'writeDurableNow').mockImplementation(async (name, value) => {
+      if (name === goal.GOAL_OBJECTIVES_STATE) {
+        objectiveWrites += 1;
+        if (objectiveWrites === 1) {
+          entered();
+          await held;
+        }
+      }
+      return realWrite(name, value);
+    });
+    try {
+      const saving = goal.setGoalObjectiveNow(fromConversationId, 'new objective');
+      await writeEntered;
+      expect(goal.moveGoalObjective(fromConversationId, toConversationId)).toBe(true);
+      expect(goal.goalObjectiveFor(fromConversationId)).toBe('');
+      expect(goal.goalObjectiveFor(toConversationId)).toBe('previous objective');
+
+      release();
+      expect(await saving).toBe('new objective');
+      expect(objectiveWrites).toBe(2);
+      expect(goal.goalObjectiveFor(fromConversationId)).toBe('');
+      expect(goal.goalObjectiveFor(toConversationId)).toBe('new objective');
+
+      await durable.flushDurable();
+      const stored = await durable.readDurable(goal.GOAL_OBJECTIVES_STATE) as ReturnType<typeof goal.snapshotGoalObjectives> | null;
+      const rows = stored?.objectives ?? [];
+      expect(rows.some(row => row.conversationId === fromConversationId)).toBe(false);
+      expect(rows).toContainEqual({ conversationId: toConversationId, objective: 'new objective' });
+    } finally {
+      write.mockRestore();
+    }
+  });
+
+  it('lets a newer durable objective survive an older failed commit', async () => {
+    const conversationId = 'c-obj-failed-overlap';
+    goal.setGoalObjective(conversationId, 'previous objective');
+    const durable = await import('../src/main/durable.js');
+    const realWrite = durable.writeDurableNow;
+    let entered = (): void => undefined;
+    const firstEntered = new Promise<void>((resolve) => { entered = resolve; });
+    let release = (): void => undefined;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    let objectiveWrites = 0;
+    const write = vi.spyOn(durable, 'writeDurableNow').mockImplementation(async (name, value) => {
+      if (name === goal.GOAL_OBJECTIVES_STATE) {
+        objectiveWrites += 1;
+        if (objectiveWrites === 1) {
+          entered();
+          await held;
+          throw new Error('first objective write failed');
+        }
+      }
+      return realWrite(name, value);
+    });
+    try {
+      const older = goal.setGoalObjectiveNow(conversationId, 'older uncommitted objective');
+      await firstEntered;
+      const newer = goal.setGoalObjectiveNow(conversationId, 'newer durable objective');
+      release();
+
+      await expect(older).rejects.toThrow('first objective write failed');
+      expect(await newer).toBe('newer durable objective');
+      expect(goal.goalObjectiveFor(conversationId)).toBe('newer durable objective');
+      await durable.flushDurable();
+      const stored = await durable.readDurable(goal.GOAL_OBJECTIVES_STATE) as ReturnType<typeof goal.snapshotGoalObjectives> | null;
+      expect(stored?.objectives).toContainEqual({ conversationId, objective: 'newer durable objective' });
+    } finally {
+      write.mockRestore();
+    }
+  });
+
+  it.each(['set', 'clear', 'move'] as const)('does not roll back a newer synchronous %s after an older objective write fails', async mutation => {
+    const conversationId = `c-obj-failed-${mutation}`;
+    const movedConversationId = `c-obj-failed-${mutation}-moved`;
+    goal.setGoalObjective(conversationId, 'previous objective');
+    const durable = await import('../src/main/durable.js');
+    let entered = (): void => undefined;
+    const writeEntered = new Promise<void>((resolve) => { entered = resolve; });
+    let release = (): void => undefined;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const write = vi.spyOn(durable, 'writeDurableNow').mockImplementationOnce(async () => {
+      entered();
+      await held;
+      throw new Error('objective write failed');
+    });
+    try {
+      const failing = goal.setGoalObjectiveNow(conversationId, 'uncommitted objective');
+      await writeEntered;
+      if (mutation === 'set') goal.setGoalObjective(conversationId, 'newer synchronous objective');
+      if (mutation === 'clear') goal.clearGoalObjective(conversationId);
+      if (mutation === 'move') expect(goal.moveGoalObjective(conversationId, movedConversationId)).toBe(true);
+      release();
+
+      await expect(failing).rejects.toThrow('objective write failed');
+      if (mutation === 'set') expect(goal.goalObjectiveFor(conversationId)).toBe('newer synchronous objective');
+      if (mutation === 'clear') expect(goal.goalObjectiveFor(conversationId)).toBe('');
+      if (mutation === 'move') {
+        expect(goal.goalObjectiveFor(conversationId)).toBe('');
+        expect(goal.goalObjectiveFor(movedConversationId)).toBe('previous objective');
+      }
+
+      await durable.flushDurable();
+      const stored = await durable.readDurable(goal.GOAL_OBJECTIVES_STATE) as ReturnType<typeof goal.snapshotGoalObjectives> | null;
+      const rows = stored?.objectives ?? [];
+      if (mutation === 'set') expect(rows).toContainEqual({ conversationId, objective: 'newer synchronous objective' });
+      if (mutation === 'clear') expect(rows.some(row => row.conversationId === conversationId)).toBe(false);
+      if (mutation === 'move') {
+        expect(rows.some(row => row.conversationId === conversationId)).toBe(false);
+        expect(rows).toContainEqual({ conversationId: movedConversationId, objective: 'previous objective' });
+      }
+    } finally {
+      write.mockRestore();
+    }
+  });
+
+  it.each(['set', 'clear', 'move'] as const)('keeps another chat\'s synchronous %s when a durable objective commit is in flight', async mutation => {
+    const durableConversation = `c-obj-cross-durable-${mutation}`;
+    const neighbor = `c-obj-cross-neighbor-${mutation}`;
+    const moved = `c-obj-cross-neighbor-${mutation}-moved`;
+    goal.setGoalObjective(durableConversation, 'old durable objective');
+    goal.setGoalObjective(neighbor, 'neighbor before');
+    const durable = await import('../src/main/durable.js');
+    const realWrite = durable.writeDurableNow;
+    let entered = (): void => undefined;
+    const writeEntered = new Promise<void>((resolve) => { entered = resolve; });
+    let release = (): void => undefined;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const write = vi.spyOn(durable, 'writeDurableNow').mockImplementationOnce(async (name, value) => {
+      entered();
+      await held;
+      return realWrite(name, value);
+    });
+    try {
+      const committing = goal.setGoalObjectiveNow(durableConversation, 'new durable objective');
+      await writeEntered;
+      if (mutation === 'set') goal.setGoalObjective(neighbor, 'neighbor after');
+      if (mutation === 'clear') goal.clearGoalObjective(neighbor);
+      if (mutation === 'move') expect(goal.moveGoalObjective(neighbor, moved)).toBe(true);
+      release();
+      expect(await committing).toBe('new durable objective');
+
+      await durable.flushDurable();
+      const stored = await durable.readDurable(goal.GOAL_OBJECTIVES_STATE) as ReturnType<typeof goal.snapshotGoalObjectives> | null;
+      const rows = stored?.objectives ?? [];
+      expect(rows).toContainEqual({ conversationId: durableConversation, objective: 'new durable objective' });
+      if (mutation === 'set') expect(rows).toContainEqual({ conversationId: neighbor, objective: 'neighbor after' });
+      if (mutation === 'clear') expect(rows.some(row => row.conversationId === neighbor)).toBe(false);
+      if (mutation === 'move') {
+        expect(rows.some(row => row.conversationId === neighbor)).toBe(false);
+        expect(rows).toContainEqual({ conversationId: moved, objective: 'neighbor before' });
+      }
+    } finally {
+      write.mockRestore();
+    }
+  });
+
   it('deduplicates Goal obligations by stable assistant reply across reload turn ids', async () => {
     await goal.acceptGoalReplyNow({
       conversationId: 'c-reply-stable',
@@ -2197,6 +2404,66 @@ describe('a chat driven towards a specific goal', () => {
     expect(goal.goalViewFor('c-obj-swap')).toBeNull();
     // …and only that chat's, and only once.
     expect(goal.retireGoalDraftsFor('c-obj-swap')).toBe(false);
+  });
+
+  /**
+   * The one place the timer's authority is decided.
+   *
+   * Three conditions have to hold together and each of them was a deliberate choice, so each
+   * gets its own case: the value must be configured, the chat must be switched on, and its
+   * mode must be Loop. Anything else answers zero, which every caller already reads as "use
+   * the ordinary schedule" — so a wrongly-armed timer is impossible to reach by accident.
+   */
+  it('arms the Loop timer only for an enabled, looping chat', async () => {
+    const base = (await import('../src/main/config.js')).getConfig();
+    const withTimer = (minutes: number) =>
+      saveConfig({ ...base, goal: { ...base.goal, loopTimerMinutes: minutes } });
+
+    // Off by default. A fresh install must not type into its chats on a clock.
+    expect(base.goal.loopTimerMinutes).toBe(0);
+    expect(goal.loopTimerMsFor('c-timer-app')).toBe(0);
+
+    await withTimer(5);
+    // Configured, but the app-wide switch is still off, so nothing is owed and nothing is armed.
+    expect(goal.loopTimerMsFor('c-timer-app')).toBe(0);
+
+    await goal.setGoalSwitchNow('c-timer-off', 'loop', false);
+    expect(goal.loopTimerMsFor('c-timer-off')).toBe(0);
+
+    await goal.setGoalSwitchNow('c-timer-on', 'loop', true);
+    expect(goal.loopTimerMsFor('c-timer-on')).toBe(300_000);
+
+    // Goal is the mode that is allowed to decide the work is finished; a clock that keeps
+    // asking would contradict the whole point of it.
+    await goal.setGoalSwitchNow('c-timer-goal', 'goal', true);
+    expect(goal.loopTimerMsFor('c-timer-goal')).toBe(0);
+
+    // Zero is the documented way back to the stall-and-retry schedule.
+    await withTimer(0);
+    expect(goal.loopTimerMsFor('c-timer-on')).toBe(0);
+  });
+
+  /**
+   * Finish-only schedules the next message at a boundary the agent announces; a timer is
+   * the user's own answer to "when do I go again". Both cannot be right for one chat, and
+   * the more specific instruction wins — otherwise a chat waiting for a finish call it will
+   * never make would simply never continue.
+   */
+  it('lets a configured Loop timer override the finish-only Astra preference', async () => {
+    const config = (await import('../src/main/config.js')).getConfig();
+    const id = 'loop-timer-astra-test';
+    const session = await createSession({ conversationId: id });
+    await observeSessionModel(session.id, id, 'gpt-6-pro', Date.now(), 'pro');
+    await goal.setGoalSwitchNow(id, 'loop', true);
+
+    // No timer: finish-only holds the chat until the agent reports the job nearly done.
+    await saveConfig({ ...config, ui: { ...config.ui, finishTool: true }, goal: { ...config.goal, loopTimerMinutes: 0 } });
+    expect(await goal.astraFinishOnly(session.id, id)).toBe(true);
+
+    // A configured interval replaces that boundary, so the chat falls back to the ordinary
+    // after-turn continuation instead of waiting for a call this cadence never asked for.
+    await saveConfig({ ...config, ui: { ...config.ui, finishTool: true }, goal: { ...config.goal, loopTimerMinutes: 5 } });
+    expect(await goal.astraFinishOnly(session.id, id)).toBe(false);
   });
 });
 

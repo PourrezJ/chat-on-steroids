@@ -191,10 +191,12 @@ define the tool/config/wire contract. README and worklogs are secondary and can 
 | Recording | On, 30-day retention. | Explicit Off stays Off; retention still applies to old history. |
 | Context / compaction | Advisory 400,000; limit rounded from advisory × 4/3; auto-compaction on at advisory. | Estimated local units. Automatic execution additionally requires live work, current ownership and eligible model/role. |
 | Multi-agent | On, 2 simultaneous slot-holding workers **per family**, configured hard max 8. | Legacy absent enabled/allow-unattributed fields remain false. Existing choices stay exact. |
+| Wait for sub-agents | Off. | When on, a Goal/Loop chat's next automatic step waits for the workers that exact chat started. A chat with no run, or a run with no workers, waits either way; a chat with a configured Loop timer never waits (§17). See §16. |
 | Unattributed allowance | True on first launch. | Relaxes ambiguity fences only; known blocked/retired/superseded ownership stays enforced. |
 | Recover ordinary/agent tabs | Off. | Goal/Loop can independently justify recovery; history alone cannot. |
 | Automatic Continue | On. | Unfinished-response recovery also serves enabled Goal/Loop. This switch controls ordinary chats; explicit Off survives and malformed config disables it. See §14. |
 | Goal / Loop | Off, preferred mode Goal. Both decision backends default to ChatGPT, helper `gpt-5.6-sol` High. | API uses the configured OpenRouter/custom endpoint and stored model. These defaults are not account-availability proof. |
+| Loop timer | Off (0 minutes). | When set, an enabled Loop chat's next automatic step is due that many minutes after the previous one: page activity does not push it out, Goal ignores it, and a compaction keeps the watch armed and restarts a full interval once the rebind clears. It also overrides the finish-only preference. See §17. |
 | Desktop | Windows on; macOS retains its off default and separate native OS consent; Linux supports extension browser control. | Existing screen/control grants also govern browser tools; unsupported native clipboard remains masked. No new per-tab permission dialog. |
 | Shell/UI | Dark theme, minimize to tray, no automatic connector connection/login startup by default. | Optional browser/finish/plan choices are resolved by current config and their consumer, not invented from absent fields. |
 | Plugin auto-refresh | Off. | Local status/discovery never claims ChatGPT refreshed its connector snapshot. |
@@ -2150,7 +2152,10 @@ editable or reorderable as authored tasks. Queue mutation APIs exclude recovery 
 renderer labels them Automatic Continue and preserves cancellation before browser handout.
 Continue, queue and Goal/Loop share pickup gaps of 2/5/10/15 minutes, then retain fifteen until
 expiry, including Pro after its initial ten-minute (Thinking failed: five-minute) silence and
-conditional five-minute wait.
+conditional five-minute wait. A chat with `goal.loopTimerMinutes` configured skips that ladder
+entirely for its generated Loop continuations: the configured interval replaces the opening gap
+and every rung, and page activity does not push it out. Authored queued input on the same chat
+keeps the ordinary schedule (§17).
 Reordering, replacing the head on the same
 source and Goal Off cannot reset the backoff. Missing pickup ACK retains its original action
 custody; status polling does not issue a fresh token. Startup restores eligible durable debt
@@ -2443,6 +2448,40 @@ commit publication gap. Old source requests retain their historical proof and ca
 prime authority in the successor. Distinct fleets remain distinct; process custody stays with
 the same durable session.
 
+### A chat's automatic step waits for its own workers
+
+A prime that delegated half its task has not finished it. Its workers report back into the same
+conversation, so taking the next Goal/Loop decision while they run reads a context that is about
+to change and then types the instruction into a chat that is still being worked on. When
+`multiAgent.waitForSubAgents` is on, that decision waits.
+A chat with a configured Loop timer is deliberately exempt: the user named the interval, so
+neither the decision nor its pickup waits for the workers (§17).
+
+`agents.ts::waitingForSubAgents` is the one owner of that answer, because worker state lives
+there. It resolves through the same per-family lookup (`runForConversation`) and the private
+`workingWorkers` that `freeWorkerSlots` already trusts, so one family can never hold another,
+an invited worker already counts, and an unknown, ambiguous, runless or workerless chat never
+waits: a hold can only come from work this exact chat started. The predicate lives here rather
+than in `bridge.ts` because `bridge.ts` imports `session/finish.js` and the finish decision needs
+the same answer, so a predicate in the bridge would close an import cycle.
+
+Three consumers needed that one fact. `owedPickups` deletes the owed key while its workers run
+instead of teaching each caller to skip it, which covers the pre-action re-check, the silence
+re-check and the handout from a single rule, and spends nothing: no attempt, no backoff window,
+no schedule movement; the debt is collected on the first sweep after the last worker stops.
+`goalWaitFor` returns a `workers` reason that `sessionControlsFor` and `/activity` already both
+read, with no `until` because the end of the wait is not a moment this app can predict, so both
+UIs name the wait without inventing a countdown. `prepareNotice` returns before the provider call
+that drafts the automatic decision and **releases** the hold rather than leaving it held, so the
+user's own answer is never stuck behind workers they did not ask about; the durable reply
+obligation survives and the pickup tree collects it later. A notice-only hold is untouched.
+All three consumers share one exemption: `loopTimerMsFor(id) === 0` in the same condition, so a
+chat with a configured Loop timer passes through every one of them untouched (§17).
+
+The wait cannot starve the reports it is waiting for: worker reports reach their prime through
+the kernel's caller offer, never through the browser outbox. `/goal/draft` needed no change; it
+already answers `409 chat_still_working` and the extension already retries that code.
+
 The app's configurable worker capacity is distinct from the coding agent's delegation policy
 in §19. Do not infer permission to launch development subagents from a product feature toggle.
 
@@ -2508,9 +2547,36 @@ reply-ID prefixes cannot grant it. Recheck restored automatic debt, provider sta
 This condition does not change ordinary Goal mode or user-message delivery.
 Automatic tickets retain exact source ownership. Native busy uses the shared one/five-minute
 wait and one Stop claim; uncollected tickets use the shared 2/5/10/15 pickup schedule (§14).
+A chat that started its own workers defers that pickup and the automatic decision
+`session_finish` would otherwise draft until the last of them stops, when the switch asks
+for it (§16). The debt is deferred, never spent.
 Fresh work and queue priority are checked again before Send. A Thinking-failed notice learned
 from an already-confirmed refresh reuses that receipt rather than earning another immediate
 reload. Genuine new work retires the receipt.
+
+**Loop timer (2026-09-23):** `GoalSettings.loopTimerMinutes` (0 = Off, whole minutes, clamped
+0..720) substitutes a fixed cadence for the stall-driven ladder. `goal.ts::loopTimerMsFor` is
+the single owner of that decision and answers non-zero only when the effective switch is
+enabled and its mode is `loop`; Goal may decide the work is finished, so a clock would
+contradict it, and a disabled chat has no delivery authority. It is a dwell time, not a poll:
+the reply obligation, its source question, `loopReplyHasAuthority`, the MCP-call requirement
+and the twelve-hour lifetime still decide whether anything is owed at all. An armed pickup
+watch then stores the interval and uses it instead of the opening gap and every backoff rung
+for that chat's generated continuations; authored queued input keeps `timer: 0` and the
+ordinary schedule. Page activity does not push a timer watch out (`notePickupActivity`
+early-returns while `watch.timer > 0`) — the user asked for a cadence, not for a stall to be
+detected. A compaction holds the watch (it must not fire into a rebind) and re-arms one fresh
+full interval from the moment `inspectOwedPickups` sees the ticket clear, because a deadline
+that expired mid-rebind must not fire the instant the replacement chat appears. The wait
+surfaces as the `timer` reason of `GoalWait`, rendered by both UIs and deliberately outside
+`sharedRecoveryWait` in `renderer/chat.ts` — an independent Loop wait, never the dock's shared
+silence countdown. A configured timer also defeats `astraFinishOnly`: finish-only waits for a
+boundary the agent announces, which is the opposite instruction to the interval the user
+named, so the chat falls back to the ordinary after-turn boundary. The ordinary silence pass
+still applies to a timer chat under its own rules; the timer owns pickup timing only. It is
+equally exempt from the sub-agent hold (§16): `goalWaitFor` keeps showing the countdown instead
+of `workers`, `owedPickups` keeps the debt instead of deleting it, and the finish boundary keeps
+its decision — a cadence that waited for workers would be a stall schedule wearing a clock.
 Historical interim backfill after a refresh must retain an already-filed ticket: a new storage
 sequence is not new work. Authored chronology and the recorder's accepted activity grant decide
 revocation; genuinely new MCP/interim/user work still revokes the old automatic source.

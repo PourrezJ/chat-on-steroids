@@ -245,7 +245,7 @@
       </div>
       <div class="notice" id="pluginRefreshReminder" role="status" hidden>
         <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-pulse" /></svg>
-        <span>Please remember to refresh the plugins in ChatGPT.</span>
+        <span>Chat On Steroids connector tools changed. Refresh the affected connector in ChatGPT; this is separate from the browser extension.</span>
         <button class="btn btn-icon" id="dismissPluginRefreshReminder" type="button" title="Dismiss reminder" aria-label="Dismiss reminder"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-x" /></svg></button>
       </div>
       </div>
@@ -768,6 +768,7 @@
                   </label>
                   <div class="setting"><span class="setting-text"><b>Goal response source</b><em>API is the most reliable. Offline uses completion markers and 200 prepared messages.</em></span><select id="goalBackend"><option value="chatgpt">Separate ChatGPT chat</option><option value="api">API key · Most reliable</option><option value="templates">Offline · No API cost</option></select></div>
                   <div class="setting"><span class="setting-text"><b>Loop response source</b><em>Loop keeps going until you switch it off.</em></span><select id="loopBackend"><option value="api">API key · Most reliable</option><option value="chatgpt">Separate ChatGPT chat</option></select></div>
+                  <div class="setting"><span class="setting-text"><b>Loop timer</b><em>Minutes between one finished Loop answer and the next message. 0 keeps the ordinary schedule: wait for a stall, then retry after 2, 5, 10 and 15 minutes. A timer replaces that with your interval, and activity does not push it out. Goal ignores it, because Goal may decide the work is finished. A compaction in progress keeps the timer waiting until it is done.</em></span><input id="goalLoopTimer" class="num" type="number" min="0" max="720" step="1" /><span class="unit">min</span></div>
                   <div class="setting"><span class="setting-text"><b>Goal, Loop and Plan model</b><em>Model for ChatGPT-generated messages and plans. Select GPT-5.6 and High below for planning.</em></span><select id="helperModel" aria-label="Goal, Loop and Plan model"></select></div>
                   <div class="setting"><span class="setting-text"><b>Goal, Loop and Plan reasoning</b><em>Used with the ChatGPT model above; independent from API reasoning.</em></span><select id="helperReasoning" aria-label="Goal, Loop and Plan reasoning"></select></div>
                   <label class="setting"><span class="setting-text"><b>Include tool details in handoffs</b><em>Handoff briefs retain tool details. Goal and Loop use user messages and assistant updates and answers.</em></span><input id="goalIncludeToolCalls" type="checkbox" /></label>
@@ -803,6 +804,14 @@
                       <em>Restore missing or unresponsive work chats. Goal and Loop chats recover automatically.</em>
                     </span>
                     <input id="recoverAgentTabs" type="checkbox" />
+                  </label>
+
+                  <label class="setting">
+                    <span class="setting-text">
+                      <b>Wait for sub-agents</b>
+                      <em>Before Goal or Loop takes its next step, wait until this chat's own workers have finished. Their reports arrive here, so deciding earlier reads a context that is about to change. Messages you type or queue are sent as usual.</em>
+                    </span>
+                    <input id="waitForSubAgents" type="checkbox" />
                   </label>
 
                   <div id="swarmList"></div>

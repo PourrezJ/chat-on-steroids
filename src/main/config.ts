@@ -134,6 +134,10 @@ const DEFAULT_GOAL: GoalSettings = {
   backend: 'chatgpt',
   loopBackend: 'chatgpt',
   impulseMinutes: 0,
+  // Off. The shipped default stays the evidence-driven schedule, because a chat that types
+  // into itself on a clock is a deliberate choice, not something to discover by flipping a
+  // switch that is already on.
+  loopTimerMinutes: 0,
   includeToolCalls: false,
   helperModel: 'gpt-5.6-sol',
   helperReasoning: 'high',
@@ -158,7 +162,10 @@ const DEFAULT_MULTI_AGENT: MultiAgentSettings = {
   allowUnattributedCalls: false,
   // Off: Goal/Loop chats are always recovered, and reopening anything else — a worker, a prime,
   // a plain chat that once called a tool — is the user's choice to make.
-  recoverAgentTabs: false
+  recoverAgentTabs: false,
+  // Off: waiting for a run's own workers before its next automatic step is a deliberate choice.
+  // A chat that delegated nothing, and a chat with no run, never wait either way.
+  waitForSubAgents: false
 };
 /** Fresh-install exposure. Kept separate from migration defaults on purpose. */
 const ALL_FIRST_LAUNCH_CAPABILITIES: Capabilities = Object.fromEntries(
@@ -347,16 +354,20 @@ const configSchema = z.object({
     defaultReasoning: z.enum(['', ...REASONING_EFFORTS]).optional(),
       maxWorkers: z.number().int().min(1).max(8).optional().default(DEFAULT_MULTI_AGENT.maxWorkers),
       allowUnattributedCalls: z.boolean().optional().default(DEFAULT_MULTI_AGENT.allowUnattributedCalls),
-      recoverAgentTabs: z.boolean().optional().default(DEFAULT_MULTI_AGENT.recoverAgentTabs)
+      recoverAgentTabs: z.boolean().optional().default(DEFAULT_MULTI_AGENT.recoverAgentTabs),
+      waitForSubAgents: z.boolean().optional().default(DEFAULT_MULTI_AGENT.waitForSubAgents ?? false)
     })
     .optional()
-    .default({ ...DEFAULT_MULTI_AGENT }),
+    .default({ ...DEFAULT_MULTI_AGENT, waitForSubAgents: DEFAULT_MULTI_AGENT.waitForSubAgents ?? false }),
   // An empty model id is repaired rather than rejected: the id is free text from a
   // provider listing that changes weekly, and a config that lost it must still load with
   // every root and permission in it intact.
   goal: z
     .object({
       impulseMinutes: z.number().int().min(0).max(60).optional().default(0).catch(0),
+      // Capped at the reply obligation's own twelve-hour lifetime: a longer interval could
+      // never fire, because the row it would collect has already expired by then.
+      loopTimerMinutes: z.number().int().min(0).max(720).optional().default(0).catch(0),
       includeToolCalls: z.boolean().optional().default(false),
       enabled: z.boolean().optional().default(DEFAULT_GOAL.enabled),
       backend: z.enum(['api', 'chatgpt', 'templates']).optional().default('chatgpt'),
@@ -425,10 +436,10 @@ const configSchema = z.object({
         .optional()
         .default(DEFAULT_GOAL.loopPrompt)
         .transform((prompt) => (prompt.trim() === '' ? DEFAULT_GOAL.loopPrompt : prompt.trim()))
-        .catch(DEFAULT_GOAL.loopPrompt)
+        .catch(DEFAULT_GOAL.loopPrompt),
     })
     .optional()
-    .default({ ...DEFAULT_GOAL, backend: 'chatgpt', loopBackend: 'chatgpt', impulseMinutes: 0, includeToolCalls: false, helperModel: 'gpt-5.6-sol', helperReasoning: 'high' }),
+    .default({ ...DEFAULT_GOAL, backend: 'chatgpt', loopBackend: 'chatgpt', impulseMinutes: 0, loopTimerMinutes: 0, includeToolCalls: false, helperModel: 'gpt-5.6-sol', helperReasoning: 'high' }),
   mcp: z
     .object({
       // Repaired rather than rejected, like the Goal prompts above: this is free text a person
