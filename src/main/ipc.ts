@@ -174,6 +174,8 @@ const settingsPatch = z.object({
     autoContinue: z.boolean().optional(),
     chatBrowser: z.enum(CHAT_BROWSERS).optional(),
     developerMode: z.boolean().optional(),
+    playfulStatus: z.boolean().optional(),
+    followOutput: z.boolean().optional(),
     finishTool: z.boolean().optional(),
     planBackend: z.enum(['chatgpt', 'api']).optional(),
     finishAction: z.enum(['notify', 'goal']).optional(),
@@ -210,7 +212,8 @@ const settingsPatch = z.object({
     maxWorkers: z.number().int().min(1).max(8),
     allowUnattributedCalls: z.boolean(),
     recoverAgentTabs: z.boolean(),
-    waitForSubAgents: z.boolean().optional()
+    waitForSubAgents: z.boolean().optional(),
+    endSleepingWorkerProcesses: z.boolean().optional()
   }),
   mcp: z.object({ instructions: z.string().trim().max(MAX_MCP_INSTRUCTIONS_CHARS) }).strict().optional(),
   controlApi: z.object({ enabled: z.boolean(), allowActions: z.boolean().optional() }).strict().optional(),
@@ -323,6 +326,8 @@ function mergeSettings(current: Config, base: SettingsSnapshot, wanted: Settings
       autoContinue: pick(current.ui.autoContinue, base.ui.autoContinue, wanted.ui.autoContinue),
       chatBrowser: pick(current.ui.chatBrowser, base.ui.chatBrowser, wanted.ui.chatBrowser),
       developerMode: pick(current.ui.developerMode, base.ui.developerMode, wanted.ui.developerMode),
+      playfulStatus: pick(current.ui.playfulStatus, base.ui.playfulStatus, wanted.ui.playfulStatus),
+      followOutput: pick(current.ui.followOutput, base.ui.followOutput, wanted.ui.followOutput),
       finishTool: pick(current.ui.finishTool, base.ui.finishTool, wanted.ui.finishTool),
       planBackend: pick(current.ui.planBackend, base.ui.planBackend, wanted.ui.planBackend),
       finishAction: pick(current.ui.finishAction, base.ui.finishAction, wanted.ui.finishAction),
@@ -382,6 +387,11 @@ function mergeSettings(current: Config, base: SettingsSnapshot, wanted: Settings
         current.multiAgent.waitForSubAgents,
         base.multiAgent.waitForSubAgents,
         wanted.multiAgent.waitForSubAgents
+      ),
+      endSleepingWorkerProcesses: pick(
+        current.multiAgent.endSleepingWorkerProcesses ?? false,
+        base.multiAgent.endSleepingWorkerProcesses ?? false,
+        wanted.multiAgent.endSleepingWorkerProcesses ?? false
       )
     },
     goal: {

@@ -785,6 +785,7 @@
                 <label class="inline"><input type="checkbox" id="developerMode" /> Developer mode: show turn boundaries and recovery events</label>
                 <label class="inline"><input type="checkbox" id="playfulStatus" /> Playful status words: show rotating gym jokes instead of “Working”</label>
                 <label class="inline"><input type="checkbox" id="persistMcpTokens" /> Keep MCP URL tokens between restarts (stored in secure storage)</label>
+                <label class="inline"><input type="checkbox" id="followOutput" /> Follow new output: stay at the end of the chat while answers grow, here and on ChatGPT. Scrolling up pauses it.</label>
                 <label class="inline"><input type="checkbox" id="controlApiEnabled" /> Local control API: let agents on this computer read app status and chats</label>
                 <label class="inline"><input type="checkbox" id="controlApiAllowActions" disabled /> Allow actions: let local agents send and cancel messages</label>
               </div>
@@ -901,6 +902,14 @@
                       <em>Before Goal or Loop takes its next step, wait until this chat's own workers have finished. Their reports arrive here, so deciding earlier reads a context that is about to change. Messages you type or queue are sent as usual.</em>
                     </span>
                     <input id="waitForSubAgents" type="checkbox" />
+                  </label>
+
+                  <label class="setting">
+                    <span class="setting-text">
+                      <b>End background processes of workers asleep for more than 30 minutes</b>
+                      <em>The worker chat and history stay reusable. Off by default; each cleanup is recorded in that worker's transcript.</em>
+                    </span>
+                    <input id="endSleepingWorkerProcesses" type="checkbox" />
                   </label>
 
                   <div id="swarmList"></div>

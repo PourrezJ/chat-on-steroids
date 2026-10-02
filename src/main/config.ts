@@ -168,7 +168,10 @@ const DEFAULT_MULTI_AGENT: MultiAgentSettings = {
   recoverAgentTabs: false,
   // Off: waiting for a run's own workers before its next automatic step is a deliberate choice.
   // A chat that delegated nothing, and a chat with no run, never wait either way.
-  waitForSubAgents: false
+  waitForSubAgents: false,
+  // Off: ending an OS process is a real side effect even though the worker identity survives.
+  // The user must opt in before sleeping-worker runtime maintenance can terminate anything.
+  endSleepingWorkerProcesses: false
 };
 /** Fresh-install exposure. Kept separate from migration defaults on purpose. */
 const ALL_FIRST_LAUNCH_CAPABILITIES: Capabilities = Object.fromEntries(
@@ -308,6 +311,8 @@ const configSchema = z.object({
     chatBrowser: z.enum(CHAT_BROWSERS).optional().default('chrome'),
     developerMode: z.boolean().optional(),
     playfulStatus: z.boolean().optional(),
+    /** Keep the chat at its end while it grows, in the app and on ChatGPT, until the reader scrolls up. */
+    followOutput: z.boolean().optional().default(true),
     finishTool: z.boolean().optional(),
     planBackend: z.enum(['chatgpt', 'api']).optional(),
     finishAction: z.enum(['notify', 'goal']).optional(),
@@ -381,10 +386,15 @@ const configSchema = z.object({
       maxWorkers: z.number().int().min(1).max(8).optional().default(DEFAULT_MULTI_AGENT.maxWorkers),
       allowUnattributedCalls: z.boolean().optional().default(DEFAULT_MULTI_AGENT.allowUnattributedCalls),
       recoverAgentTabs: z.boolean().optional().default(DEFAULT_MULTI_AGENT.recoverAgentTabs),
-      waitForSubAgents: z.boolean().optional().default(DEFAULT_MULTI_AGENT.waitForSubAgents ?? false)
+      waitForSubAgents: z.boolean().optional().default(DEFAULT_MULTI_AGENT.waitForSubAgents ?? false),
+      endSleepingWorkerProcesses: z.boolean().optional().default(DEFAULT_MULTI_AGENT.endSleepingWorkerProcesses ?? false)
     })
     .optional()
-    .default({ ...DEFAULT_MULTI_AGENT, waitForSubAgents: DEFAULT_MULTI_AGENT.waitForSubAgents ?? false }),
+    .default({
+      ...DEFAULT_MULTI_AGENT,
+      waitForSubAgents: DEFAULT_MULTI_AGENT.waitForSubAgents ?? false,
+      endSleepingWorkerProcesses: DEFAULT_MULTI_AGENT.endSleepingWorkerProcesses ?? false
+    }),
   // An empty model id is repaired rather than rejected: the id is free text from a
   // provider listing that changes weekly, and a config that lost it must still load with
   // every root and permission in it intact.
@@ -513,7 +523,7 @@ export function defaultConfig(platform: NodeJS.Platform = process.platform, rele
     readOnly: false,
     commandAllowlist: { ...DEFAULT_COMMAND_ALLOWLIST, rules: [] },
     tunnel: { kind: 'openai', tunnelId: '', desktopTunnelId: '', binaryPath: '' },
-    ui: { minimizeToTray: true, autoConnect: false, startAtLogin: false, privacyScreenshots: false, theme: 'dark', autoRefreshPlugins: false, persistMcpTokens: false, backgroundChats: true, browserBridgePort: 'auto', autoContinue: true },
+    ui: { minimizeToTray: true, autoConnect: false, startAtLogin: false, privacyScreenshots: false, theme: 'dark', autoRefreshPlugins: false, persistMcpTokens: false, backgroundChats: true, browserBridgePort: 'auto', autoContinue: true, followOutput: true },
     sessions: { ...DEFAULT_SESSIONS },
     compaction: { ...DEFAULT_COMPACTION },
     multiAgent: { ...FIRST_LAUNCH_MULTI_AGENT },
