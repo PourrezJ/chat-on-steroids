@@ -1663,7 +1663,6 @@
   "Pet operation failed": "A operação do pet falhou",
   "This removes the pet from your local library. You can import it again later.": "Isso remove o pet da sua biblioteca local. Você pode importá-lo novamente depois.",
   "Playful status words: show rotating gym jokes instead of “Working”": "Palavras de status divertidas: mostrar piadas de academia no lugar de “Working”",
-  "Keep MCP URL tokens between restarts (stored in secure storage)": "Manter tokens de URL MCP entre reinicializações (armazenados no armazenamento seguro)",
   "GitHub URL": "URL do GitHub",
   "https://github.com/owner/repo/tree/main/skill": "https://github.com/owner/repo/tree/main/skill",
   "Import a folder, a standalone SKILL.md, or a public GitHub skill. Local skills can be linked to their GitHub source to check for updates; installing an update stays your choice.": "Importe uma pasta, um SKILL.md avulso ou uma skill pública do GitHub. Skills locais podem ser vinculadas à fonte no GitHub para verificar atualizações; instalar uma atualização é sempre escolha sua.",
@@ -1759,5 +1758,8 @@
   "Its last turn produced nothing and nothing followed. Send a message there to start a fresh turn.": "O último turno não produziu nada e nada veio depois. Envie uma mensagem lá para começar um novo turno.",
   "Its last turn failed and nothing followed. Send a message there to start a fresh turn.": "O último turno falhou e nada veio depois. Envie uma mensagem lá para começar um novo turno.",
   "Recovery stopped": "Recuperação interrompida",
-  "The browser did not pick up this chat's repair, so the app stopped retrying. Open its tab again and recovery resumes.": "O navegador não assumiu o reparo deste chat, então o app parou de tentar. Abra a aba dele de novo e a recuperação continua."
+  "The browser did not pick up this chat's repair, so the app stopped retrying. Open its tab again and recovery resumes.": "O navegador não assumiu o reparo deste chat, então o app parou de tentar. Abra a aba dele de novo e a recuperação continua.",
+  "Healthy": "Saudável",
+  "Degraded": "Degradado",
+  "Unknown": "Desconhecido"
 }

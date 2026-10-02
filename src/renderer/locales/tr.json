@@ -1663,7 +1663,6 @@
   "Pet operation failed": "Evcil hayvan işlemi başarısız oldu",
   "This removes the pet from your local library. You can import it again later.": "Bu, evcil hayvanı yerel kitaplığından kaldırır. Daha sonra yeniden içe aktarabilirsin.",
   "Playful status words: show rotating gym jokes instead of “Working”": "Eğlenceli durum sözcükleri: “Working” yerine değişen spor salonu şakaları göster",
-  "Keep MCP URL tokens between restarts (stored in secure storage)": "MCP URL belirteçlerini yeniden başlatmalar arasında koru (güvenli depolamada saklanır)",
   "GitHub URL": "GitHub URL'si",
   "https://github.com/owner/repo/tree/main/skill": "https://github.com/owner/repo/tree/main/skill",
   "Import a folder, a standalone SKILL.md, or a public GitHub skill. Local skills can be linked to their GitHub source to check for updates; installing an update stays your choice.": "Bir klasör, tek bir SKILL.md ya da herkese açık bir GitHub becerisi içe aktar. Yerel beceriler güncellemeleri denetlemek için GitHub kaynağına bağlanabilir; güncellemeyi yükleyip yüklememek sana kalmış.",
@@ -1759,5 +1758,8 @@
   "Its last turn produced nothing and nothing followed. Send a message there to start a fresh turn.": "Son turu hiçbir şey üretmedi ve ardından hiçbir şey gelmedi. Yeni bir tur başlatmak için oraya bir mesaj gönderin.",
   "Its last turn failed and nothing followed. Send a message there to start a fresh turn.": "Son turu başarısız oldu ve ardından hiçbir şey gelmedi. Yeni bir tur başlatmak için oraya bir mesaj gönderin.",
   "Recovery stopped": "Kurtarma durduruldu",
-  "The browser did not pick up this chat's repair, so the app stopped retrying. Open its tab again and recovery resumes.": "Tarayıcı bu sohbetin onarımını almadı, bu yüzden uygulama yeniden denemeyi bıraktı. Sekmesini yeniden açın, kurtarma devam eder."
+  "The browser did not pick up this chat's repair, so the app stopped retrying. Open its tab again and recovery resumes.": "Tarayıcı bu sohbetin onarımını almadı, bu yüzden uygulama yeniden denemeyi bıraktı. Sekmesini yeniden açın, kurtarma devam eder.",
+  "Healthy": "Sağlıklı",
+  "Degraded": "Bozulmuş",
+  "Unknown": "Bilinmiyor"
 }

@@ -1663,7 +1663,6 @@
   "Pet operation failed": "宠物操作失败",
   "This removes the pet from your local library. You can import it again later.": "这会将宠物从你的本地库中移除。你可以稍后重新导入。",
   "Playful status words: show rotating gym jokes instead of “Working”": "趣味状态词：以轮换的健身梗代替“Working”",
-  "Keep MCP URL tokens between restarts (stored in secure storage)": "在重启之间保留 MCP URL 令牌（存储在安全存储中）",
   "GitHub URL": "GitHub 网址",
   "https://github.com/owner/repo/tree/main/skill": "https://github.com/owner/repo/tree/main/skill",
   "Import a folder, a standalone SKILL.md, or a public GitHub skill. Local skills can be linked to their GitHub source to check for updates; installing an update stays your choice.": "导入文件夹、独立的 SKILL.md 或公开的 GitHub 技能。本地技能可关联 GitHub 来源以检查更新；是否安装由你决定。",
@@ -1759,5 +1758,8 @@
   "Its last turn produced nothing and nothing followed. Send a message there to start a fresh turn.": "它的最后一轮没有产生任何内容，之后也没有后续。在那里发送一条消息即可开始新的一轮。",
   "Its last turn failed and nothing followed. Send a message there to start a fresh turn.": "它的最后一轮失败了，之后也没有后续。在那里发送一条消息即可开始新的一轮。",
   "Recovery stopped": "恢复已停止",
-  "The browser did not pick up this chat's repair, so the app stopped retrying. Open its tab again and recovery resumes.": "浏览器没有接手这个聊天的修复，因此应用已停止重试。重新打开它的标签页即可继续恢复。"
+  "The browser did not pick up this chat's repair, so the app stopped retrying. Open its tab again and recovery resumes.": "浏览器没有接手这个聊天的修复，因此应用已停止重试。重新打开它的标签页即可继续恢复。",
+  "Healthy": "正常",
+  "Degraded": "降级",
+  "Unknown": "未知"
 }
